@@ -1,0 +1,11 @@
+{
+  "channelId": "whatsapp",
+  "accountId": "default",
+  "conversationId": "120363000000000000@g.us",
+  "messageId": "msg-whatsapp-001",
+  "from": "+15555550123",
+  "content": "approve AR7K2P",
+  "metadata": {
+    "senderE164": "+15555550123"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "ruler_url": "http://127.0.0.1:4622",
+  "public_base_url": "http://127.0.0.1:4622",
+  "poll_interval_seconds": 8,
+  "decision_ttl_seconds": 7200,
+  "short_id_length": 6,
+  "inbound_bind": "127.0.0.1:4661",
+  "state_file": "~/.local/share/agent-ruler/bridge/openclaw-state.json",
+  "openclaw_bin": "openclaw",
+  "agent_ruler_bin": "agent-ruler"
+}

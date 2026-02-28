@@ -1,0 +1,42 @@
+{
+  "id": "openclaw-agent-ruler-tools",
+  "name": "Agent Ruler OpenClaw Bridge",
+  "version": "0.1.7",
+  "description": "OpenClaw tools for Agent Ruler status feed, approval wait, and transfer requests",
+  "entry": "index.ts",
+  "permissions": {
+    "network": true
+  },
+  "hooks": [
+    "agent:tool"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "Agent Ruler base URL",
+        "default": "http://127.0.0.1:4622"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "HTTP timeout for tool calls",
+        "default": 10000,
+        "minimum": 1000,
+        "maximum": 60000
+      },
+      "approvalWaitTimeoutSecs": {
+        "type": "number",
+        "description": "Max seconds to wait for operator approval before returning pending",
+        "default": 90,
+        "minimum": 1,
+        "maximum": 300
+      },
+      "autoWaitForApprovals": {
+        "type": "boolean",
+        "description": "Automatically wait/resume for pending approvals",
+        "default": true
+      }
+    }
+  }
+}

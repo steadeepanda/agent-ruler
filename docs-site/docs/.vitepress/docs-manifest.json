@@ -1,0 +1,113 @@
+{
+  "sections": [
+    {
+      "id": "getting-started",
+      "title": "Getting Started",
+      "items": [
+        {
+          "title": "About Agent Ruler",
+          "route": "guides/about-agent-ruler",
+          "source": "docs-site/docs/guides/about-agent-ruler.md"
+        },
+        {
+          "title": "Getting Started",
+          "route": "guides/getting-started",
+          "source": "docs-site/docs/guides/getting-started.md"
+        },
+        {
+          "title": "Control Panel",
+          "route": "guides/control-panel",
+          "source": "docs-site/docs/guides/control-panel.md"
+        },
+        {
+          "title": "Manual Tests",
+          "route": "guides/manual-tests",
+          "source": "docs-site/docs/guides/manual-tests.md"
+        }
+      ]
+    },
+    {
+      "id": "integrations",
+      "title": "Integrations",
+      "items": [
+        {
+          "title": "OpenClaw Guide",
+          "route": "integrations/openclaw-guide",
+          "source": "docs-site/docs/integrations/openclaw-guide.md"
+        },
+        {
+          "title": "OpenClaw API Reference",
+          "route": "integrations/openclaw-api-reference",
+          "source": "docs-site/docs/integrations/openclaw-api-reference.md"
+        },
+        {
+          "title": "More Integrations (Soon)",
+          "route": "integrations/coming-soon",
+          "source": "docs-site/docs/integrations/coming-soon.md"
+        }
+      ]
+    },
+    {
+      "id": "concepts",
+      "title": "Concepts",
+      "items": [
+        {
+          "title": "Workspace, Shared Zone, Deliver",
+          "route": "concepts/zones-and-flows",
+          "source": "docs-site/docs/concepts/zones-and-flows.md"
+        },
+        {
+          "title": "Architecture",
+          "route": "concepts/architecture",
+          "source": "docs/architecture.md",
+          "generated": true
+        }
+      ]
+    },
+    {
+      "id": "security",
+      "title": "Security",
+      "items": [
+        {
+          "title": "Prompt Injection (Detailed)",
+          "route": "security/prompt-injection",
+          "source": "docs/security/prompt-injection.md",
+          "generated": true
+        },
+        {
+          "title": "Security Policy",
+          "route": "security/security-policy",
+          "source": "SECURITY.md",
+          "generated": true
+        }
+      ]
+    },
+    {
+      "id": "cli-reference",
+      "title": "CLI Reference",
+      "items": [
+        {
+          "title": "CLI Commands",
+          "route": "reference/cli",
+          "source": "docs-site/docs/reference/cli.md"
+        },
+        {
+          "title": "Policy Reference",
+          "route": "reference/policy",
+          "source": "docs-site/docs/reference/policy.md"
+        }
+      ]
+    },
+    {
+      "id": "troubleshooting",
+      "title": "Troubleshooting",
+      "items": [
+        {
+          "title": "Common Issues",
+          "route": "troubleshooting/common-issues",
+          "source": "docs-site/docs/troubleshooting/common-issues.md"
+        }
+      ]
+    }
+  ]
+}

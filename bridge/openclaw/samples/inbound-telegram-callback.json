@@ -1,0 +1,9 @@
+{
+  "channelId": "telegram",
+  "accountId": "default",
+  "conversationId": "123456789",
+  "messageId": "msg-telegram-001",
+  "from": "123456789",
+  "content": "callback_data: ar:approve:AR7K2P",
+  "metadata": {}
+}

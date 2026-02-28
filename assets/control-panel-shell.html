@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Ruler Beta - Control Panel</title>
+  <script>
+    (function () {
+      var key = 'vitepress-theme-appearance';
+      var theme = localStorage.getItem(key) || 'dark';
+      if (theme !== 'light') theme = 'dark';
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.classList.toggle('dark', theme === 'dark');
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/design-tokens.css" />
+  <link rel="stylesheet" href="/assets/ui.css" />
+</head>
+<body data-page="{{ACTIVE_PAGE}}">
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-header-row">
+          <div class="sidebar-brand">
+            <div class="sidebar-brand-icon">
+              <img src="/assets/logo-mark.svg" alt="Agent Ruler logo" />
+            </div>
+            <div class="sidebar-brand-text">
+              <h1>Agent Ruler <span class="beta-badge">Beta</span></h1>
+              <p>Security Control Panel</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <nav class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-section-title">Main</div>
+          <a href="/" class="nav-item" data-page-link="overview">
+            <span class="nav-item-icon">📊</span>
+            <span class="nav-item-label">Overview</span>
+          </a>
+          <a href="/approvals" class="nav-item" data-page-link="approvals">
+            <span class="nav-item-icon">✅</span>
+            <span class="nav-item-label">Approvals</span>
+            <span class="nav-item-badge" data-badge="approvals" style="display: none;">0</span>
+          </a>
+          <a href="/files" class="nav-item" data-page-link="files">
+            <span class="nav-item-icon">📁</span>
+            <span class="nav-item-label">Import / Export</span>
+          </a>
+        </div>
+        
+        <div class="nav-section">
+          <div class="nav-section-title">Configuration</div>
+          <a href="/policy" class="nav-item" data-page-link="policy">
+            <span class="nav-item-icon">⚙️</span>
+            <span class="nav-item-label">Policy</span>
+          </a>
+          <a href="/runtime" class="nav-item" data-page-link="runtime">
+            <span class="nav-item-icon">📂</span>
+            <span class="nav-item-label">Runtime Paths</span>
+          </a>
+          <a href="/settings" class="nav-item" data-page-link="settings">
+            <span class="nav-item-icon">🧩</span>
+            <span class="nav-item-label">Control Settings</span>
+          </a>
+          <a href="/execution" class="nav-item" data-page-link="execution">
+            <span class="nav-item-icon">⚡</span>
+            <span class="nav-item-label">Execution Layer</span>
+          </a>
+        </div>
+        
+        <div class="nav-section">
+          <div class="nav-section-title">Monitoring</div>
+          <a href="/receipts" class="nav-item" data-page-link="receipts">
+            <span class="nav-item-icon">📜</span>
+            <span class="nav-item-label">Timeline</span>
+          </a>
+          <a href="/help/" class="nav-item" target="_blank" rel="noopener">
+            <span class="nav-item-icon">📚</span>
+            <span class="nav-item-label">Documentation</span>
+          </a>
+        </div>
+      </nav>
+      
+      <div class="sidebar-footer">
+        <div class="sidebar-info">
+          <div class="sidebar-info-title">Runtime Info</div>
+          <div class="sidebar-info-content">Loading...</div>
+        </div>
+      </div>
+    </aside>
+    <div id="sidebar-overlay" class="sidebar-overlay"></div>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+      <!-- Header -->
+      <header class="header">
+        <div class="header-left">
+          <button
+            id="mobile-menu-btn"
+            class="mobile-menu-btn"
+            type="button"
+            aria-label="Open navigation"
+            aria-controls="sidebar"
+            aria-expanded="false"
+          >
+            ☰
+          </button>
+          <button
+            id="sidebar-collapse-global-btn"
+            class="sidebar-collapse-global-btn"
+            type="button"
+            aria-label="Collapse navigation"
+            title="Collapse navigation"
+          >
+            «
+          </button>
+          <div>
+            <h2 class="header-title">Loading...</h2>
+            <p class="header-subtitle"></p>
+          </div>
+        </div>
+        <div class="header-right">
+          <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+            <span class="theme-toggle-icon" aria-hidden="true">🌙</span>
+            <span class="theme-toggle-label">Dark</span>
+          </button>
+          <div class="header-chips"></div>
+        </div>
+      </header>
+      
+      <!-- Page Content -->
+      <div class="page-content">
+        <div id="page-root"></div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+  
+  <!-- Modal -->
+  <div id="modal-backdrop" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title" class="modal-title">Modal Title</h3>
+        <button id="modal-close" class="modal-close">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-footer" class="modal-footer"></div>
+    </div>
+  </div>
+  
+  <script src="/assets/ui.js" defer></script>
+</body>
+</html>

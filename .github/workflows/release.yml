@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'v0.1.4'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: OpenClaw tools sanity check
+        run: node bridge/openclaw/openclaw-agent-ruler-tools/sanity-check.mjs
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build docs bundle
+        run: |
+          npm --prefix docs-site ci
+          npm --prefix docs-site run docs:build
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${TAG#v}"
+          HEADER_A="## [${VERSION}]"
+          HEADER_B="## [v${VERSION}]"
+
+          awk -v a="$HEADER_A" -v b="$HEADER_B" '
+            BEGIN { in_section=0; found=0 }
+            (index($0, a) == 1 || index($0, b) == 1) { in_section=1; found=1; next }
+            $0 ~ /^## \[/ && in_section==1 { exit }
+            in_section==1 { print }
+            END { if (found==0) exit 2 }
+          ' CHANGELOG.md > RELEASE_NOTES.md || {
+            echo "Could not find release-notes section starting with '${HEADER_A}' or '${HEADER_B}' in CHANGELOG.md." >&2
+            exit 1
+          }
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Release notes extraction produced an empty RELEASE_NOTES.md for '${HEADER_A}' / '${HEADER_B}'." >&2
+            exit 1
+          fi
+
+      - name: Build and package Linux release artifact
+        run: |
+          set -euo pipefail
+
+          BIN="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; d=json.load(sys.stdin); pkgs=d.get("packages",[]); pkg=pkgs[0] if pkgs else {}; bins=[t.get("name") for t in pkg.get("targets",[]) if "bin" in t.get("kind",[])]; print((bins[0] if bins else "agent-ruler"))')"
+          echo "Detected release binary: ${BIN}"
+
+          cargo build --release --bin "${BIN}"
+
+          mkdir -p dist
+          cp "target/release/${BIN}" "dist/${BIN}"
+          cp -a bridge dist/bridge
+          mkdir -p dist/docs-site/docs/.vitepress
+          cp -a docs-site/docs/.vitepress/dist dist/docs-site/docs/.vitepress/dist
+          tar -C dist -czf dist/agent-ruler-linux-x86_64.tar.gz "${BIN}" "bridge" "docs-site"
+          (
+            cd dist
+            sha256sum agent-ruler-linux-x86_64.tar.gz > SHA256SUMS.txt
+          )
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/agent-ruler-linux-x86_64.tar.gz
+            dist/SHA256SUMS.txt

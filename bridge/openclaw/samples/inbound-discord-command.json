@@ -1,0 +1,9 @@
+{
+  "channelId": "discord",
+  "accountId": "default",
+  "conversationId": "123456789012345678",
+  "messageId": "msg-discord-001",
+  "from": "user:123456789012345678",
+  "content": "deny AR7K2P",
+  "metadata": {}
+}
