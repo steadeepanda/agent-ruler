@@ -15,6 +15,7 @@ All notable user-facing changes are documented here.
   - update notifications when a newer release is detected.
 - Added Timeline mode switch (`Receipts` / `Logs`) with persistent UI/operator event logging, including update-check and update-apply failures for retrace/debug workflows.
 - Adjusted Control Settings update-check button styling to match the displayed version badge sizing.
+- Changed automatic update-check cadence to every 2 hours, and applied the same 2-hour backoff after failed checks to avoid 15-second retry noise.
 - Update path preserves runtime data/config and only replaces release install artifacts.
 
 ### Installer/runtime coherence

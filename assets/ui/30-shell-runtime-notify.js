@@ -4,7 +4,7 @@
 
   const UPDATE_CHECK_CACHE_KEY = 'ar.update.check.cache.v1';
   const UPDATE_CHECK_NOTIFIED_TAG_KEY = 'ar.update.notified_tag';
-  const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+  const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
 
   async function refreshStatus() {
     try {
@@ -88,7 +88,7 @@
     }
   }
 
-  function readCachedUpdateStatus() {
+  function readCachedUpdateCheckEnvelope() {
     try {
       const raw = localStorage.getItem(UPDATE_CHECK_CACHE_KEY);
       if (!raw) return null;
@@ -96,18 +96,18 @@
       const checkedAt = Number(parsed.checked_at_ms || 0);
       if (!Number.isFinite(checkedAt) || checkedAt <= 0) return null;
       if ((Date.now() - checkedAt) > UPDATE_CHECK_INTERVAL_MS) return null;
-      if (!parsed.payload || typeof parsed.payload !== 'object') return null;
-      return parsed.payload;
+      return parsed;
     } catch (_) {
       return null;
     }
   }
 
-  function writeCachedUpdateStatus(payload) {
+  function writeCachedUpdateStatus(payload, errorMessage) {
     try {
       localStorage.setItem(UPDATE_CHECK_CACHE_KEY, JSON.stringify({
         checked_at_ms: Date.now(),
-        payload
+        payload: payload && typeof payload === 'object' ? payload : null,
+        error: errorMessage ? String(errorMessage) : null
       }));
     } catch (_) {}
   }
@@ -140,12 +140,19 @@
     const quiet = !!options.quiet;
 
     if (!force) {
-      const cached = readCachedUpdateStatus();
-      if (cached) {
-        state.update = cached;
-        updateHeader();
-        updateSidebarInfo();
-        return cached;
+      const cachedEnvelope = readCachedUpdateCheckEnvelope();
+      const cachedPayload = cachedEnvelope && cachedEnvelope.payload && typeof cachedEnvelope.payload === 'object'
+        ? cachedEnvelope.payload
+        : null;
+      if (cachedEnvelope) {
+        if (cachedPayload) {
+          state.update = cachedPayload;
+          updateHeader();
+          updateSidebarInfo();
+          return cachedPayload;
+        }
+        // Recent failed/empty check attempt: do not hammer GitHub on every poll.
+        return state.update;
       }
     }
 
@@ -154,6 +161,7 @@
       const response = await api('/api/update/check');
       payload = normalizeUpdatePayload(response);
     } catch (err) {
+      writeCachedUpdateStatus(null, err.message || String(err));
       if (!quiet) {
         toast(`Update check failed: ${err.message}`, 'warning');
         recordUiEvent('warning', 'update-check', `Update check failed: ${err.message}`);
@@ -162,6 +170,7 @@
     }
 
     if (!payload) {
+      writeCachedUpdateStatus(null, 'unexpected_response');
       if (!quiet) {
         toast('Update check returned an unexpected response', 'warning');
         recordUiEvent('warning', 'update-check', 'Update check returned an unexpected response');
@@ -170,7 +179,7 @@
     }
 
     state.update = payload;
-    writeCachedUpdateStatus(payload);
+    writeCachedUpdateStatus(payload, null);
     updateHeader();
     updateSidebarInfo();
 
