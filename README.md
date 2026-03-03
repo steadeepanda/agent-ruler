@@ -27,6 +27,36 @@ If you want the full story (and get the vibe), read: **[about this project](./ab
 
 ---
 
+## Product Showcase
+
+<details>
+<summary><strong>Control Panel WebUI Gallery</strong></summary>
+
+Screenshots below show the main operator surfaces: overview, approvals, import/export, policy, runtime paths, settings, execution layer, and timeline.
+
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-26-47.png" alt="Agent Ruler Control Panel overview page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-26-52.png" alt="Agent Ruler Control Panel approvals page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-04.png" alt="Agent Ruler Control Panel import export page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-16.png" alt="Agent Ruler Control Panel policy page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-48.png" alt="Agent Ruler Control Panel runtime paths page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-28-19.png" alt="Agent Ruler Control Panel settings page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-28-35.png" alt="Agent Ruler Control Panel execution layer page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-30-02.png" alt="Agent Ruler Control Panel timeline page" width="900" />
+
+</details>
+
+<details>
+<summary><strong>Live Channel Workflow Demo (Telegram)</strong></summary>
+
+This demo shows a small end-to-end transfer flow where an agent-side workspace file is mediated through Agent Ruler and delivered to the user destination with channel-assisted operator decisions.
+
+<img src="docs-site/docs/public/images/telegram-transfert-task0a-01.png" alt="Telegram workflow demo step 1" width="450" />
+<img src="docs-site/docs/public/images/telegram-transfert-task0a-02.png" alt="Telegram workflow demo step 2" width="450" />
+<img src="docs-site/docs/public/images/telegram-transfert-task0a-03.png" alt="Telegram workflow demo step 3" width="450" />
+
+</details>
+
+---
 ## Threat Model (And What It Does Not Do)
 
 The Ruler (yeah that's how I call it, I don't like too much formalities so when you see Ruler I mean Agent Ruler) is built to reduce damage from **prompt injection** and “xyz deleted my files da*n!” moments 👀 by enforcing boundaries **outside the model**.

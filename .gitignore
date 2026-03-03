@@ -10,6 +10,7 @@
 /docs-site/node_modules/
 /docs-site/.vitepress/cache/
 /docs-site/docs/.vitepress/cache/
+/docs-site/docs/.vitepress/.temp/
 /docs/.vitepress/
 
 # Local automation / editor artifacts
@@ -23,10 +24,7 @@
 .pytest_cache/
 
 # Telegram E2E harness artifacts/runtime
-/artifacts/telegram-e2e-*.md
-/artifacts/telegram-e2e-*/
-/user_data/openclaw_home/*
-/user_data/logs/openclaw-gateway.log
+/artifacts/*
 
 
 .gitignore.local
