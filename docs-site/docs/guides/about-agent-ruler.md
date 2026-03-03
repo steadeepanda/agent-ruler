@@ -17,7 +17,7 @@ I came up with that design seamlessly easy to integrate it with the current popu
 
 The Ruler is built around one simple idea:
 
-Agents useful, us no babysitting, us afk, us smiling, us happy
+Agents useful, nerd no babysitting, nerd afk, nerd smiling, nerd happy (Yes "nerd" includes you too &#59;))
 
 So the default experience should feel like this:
 

@@ -18,11 +18,11 @@ function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
     createBaseVNode("p", null, "Use:", -1),
     createBaseVNode("ul", null, [
       createBaseVNode("li", null, [
-        createBaseVNode("a", { href: "/help/integrations/openclaw-guide" }, "OpenClaw Guide"),
+        createBaseVNode("a", { href: "/help/integrations/openclaw-guide.html" }, "OpenClaw Guide"),
         createTextVNode(" for setup and operator workflow")
       ]),
       createBaseVNode("li", null, [
-        createBaseVNode("a", { href: "/help/integrations/openclaw-api-reference" }, "OpenClaw API Reference"),
+        createBaseVNode("a", { href: "/help/integrations/openclaw-api-reference.html" }, "OpenClaw API Reference"),
         createTextVNode(" for endpoint contracts")
       ])
     ], -1)

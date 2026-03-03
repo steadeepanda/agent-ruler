@@ -65,7 +65,9 @@ export default defineConfig({
   title: 'Agent Ruler Docs',
   description: 'Deterministic reference monitor and confinement control panel',
   lang: 'en-US',
-  cleanUrls: true,
+  // Axum serves prebuilt static files directly; explicit `.html` links avoid
+  // clean-URL rewrite mismatches and stale hydration artifacts.
+  cleanUrls: false,
   base: '/help/',
   appearance: true,
 

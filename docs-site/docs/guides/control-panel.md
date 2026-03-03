@@ -3,6 +3,24 @@
 This page is your practical tour of the WebUI.
 If you are still on setup, start with [Getting Started](/guides/getting-started).
 
+## Control Panel screenshots
+
+<details>
+<summary><strong>Expand WebUI screenshot gallery</strong></summary>
+
+These screenshots show the full operator journey across the Control Panel tabs.
+
+![Control Panel overview page](/images/control-webui/Screenshot%20from%202026-03-02%2019-26-47.png)
+![Control Panel approvals page](/images/control-webui/Screenshot%20from%202026-03-02%2019-26-52.png)
+![Control Panel import export page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-04.png)
+![Control Panel policy page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-16.png)
+![Control Panel runtime paths page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-48.png)
+![Control Panel settings page](/images/control-webui/Screenshot%20from%202026-03-02%2019-28-19.png)
+![Control Panel execution layer page](/images/control-webui/Screenshot%20from%202026-03-02%2019-28-35.png)
+![Control Panel timeline page](/images/control-webui/Screenshot%20from%202026-03-02%2019-30-02.png)
+
+</details>
+
 ## Navigation map
 
 - `Overview`: runtime snapshot and quick actions
