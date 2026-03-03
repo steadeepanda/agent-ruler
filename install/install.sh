@@ -319,6 +319,7 @@ install_local() {
   local install_root="${HOME}/.local/share/agent-ruler/installs/dev"
   local install_parent="${HOME}/.local/share/agent-ruler/installs"
   local install_bridge_root="${install_parent}/bridge"
+  local install_docs_root="${install_parent}/docs-site"
   local install_binary="${install_root}/agent-ruler"
   local link_dir="${HOME}/.local/bin"
   local link_path="${link_dir}/agent-ruler"
@@ -349,6 +350,22 @@ install_local() {
   rm -rf "${install_bridge_root}"
   mkdir -p "${install_bridge_root}"
   cp -a "${REPO_ROOT}/bridge/." "${install_bridge_root}/"
+
+  # Local installs should serve docs directly from the repo tree.
+  # Rebuild docs bundle when npm is available, then clear runtime docs cache so
+  # stale bundled assets never shadow current local docs content.
+  if [[ -d "${REPO_ROOT}/docs-site/docs" ]]; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "[install] rebuilding local docs bundle"
+      (
+        cd "${REPO_ROOT}"
+        npm --prefix docs-site run docs:build >/dev/null
+      ) || echo "[install] warning: local docs build failed; keeping previous docs bundle"
+    else
+      echo "[install] npm not found; skipping local docs rebuild"
+    fi
+  fi
+  rm -rf "${install_docs_root}"
 
   # Keep only the current local install instance to avoid stale binary reuse.
   prune_stale_install_instances "${install_parent}" "dev"
