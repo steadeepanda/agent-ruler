@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agent_ruler": {
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/../../shared/agent_ruler_mcp_server.py"
+      ],
+      "env": {
+        "AGENT_RULER_BASE_URL": "${AGENT_RULER_BASE_URL}",
+        "AGENT_RULER_RUNNER_ID": "claudecode"
+      }
+    }
+  }
+}

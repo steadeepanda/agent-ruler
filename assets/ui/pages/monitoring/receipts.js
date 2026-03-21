@@ -2,6 +2,7 @@
   function renderReceipts(root) {
     const receiptFilters = state.receipts.filters;
     const logFilters = state.logs.filters;
+    const runnerOptions = runnerFilterOptions();
     const showDetails = !!state.receipts.showDetails;
     const mode = state.receipts.mode === 'logs' ? 'logs' : 'receipts';
 
@@ -38,6 +39,14 @@
                 <label class="filter-label">Search</label>
                 <input type="text" id="filter-q" class="form-input" placeholder="Search..." value="${esc(receiptFilters.q)}" />
               </div>
+              <div class="filter-group">
+                <label class="filter-label">Runner</label>
+                <select id="timeline-runner-filter" class="form-select">
+                  ${runnerOptions.map((runner) => `
+                    <option value="${esc(runner.id)}" ${state.runnerFilter === runner.id ? 'selected' : ''}>${esc(runner.label)}</option>
+                  `).join('')}
+                </select>
+              </div>
             ` : `
               <div class="filter-group">
                 <label class="filter-label">Level</label>
@@ -56,6 +65,14 @@
                 <label class="filter-label">Search</label>
                 <input type="text" id="log-filter-q" class="form-input" placeholder="Search..." value="${esc(logFilters.q)}" />
               </div>
+              <div class="filter-group">
+                <label class="filter-label">Runner</label>
+                <select id="timeline-runner-filter" class="form-select">
+                  ${runnerOptions.map((runner) => `
+                    <option value="${esc(runner.id)}" ${state.runnerFilter === runner.id ? 'selected' : ''}>${esc(runner.label)}</option>
+                  `).join('')}
+                </select>
+              </div>
             `}
             <div class="filter-actions">
               <button id="filter-apply" class="btn btn-primary btn-sm">Apply</button>
@@ -67,11 +84,7 @@
               <input type="checkbox" id="filter-show-details" class="form-check-input" ${showDetails ? 'checked' : ''} />
               <span class="form-check-label">Show operator-only debug details</span>
             </label>
-            <label class="form-check mb-2">
-              <input type="checkbox" id="filter-runtime-aliases" class="form-check-input" ${state.receipts.useRuntimeAliases ? 'checked' : ''} />
-              <span class="form-check-label">Use runtime path labels (recommended)</span>
-            </label>
-            <p class="form-hint mb-4">Summary view keeps output readable. Debug mode shows full command/diff context. Runtime labels shorten long paths, for example <code class="mono">WORKSPACE_PATH/src/main.rs</code>.</p>
+            <p class="form-hint mb-4">Summary view keeps output readable. Debug mode shows full command/diff context. Runtime label display is controlled globally in <a href="/settings">Control Settings</a>.</p>
           ` : `
             <p class="form-hint mb-4">Logs mode captures Control Panel events (errors, warnings, update checks/apply lifecycle) to help retrace issues.</p>
           `}
@@ -95,6 +108,17 @@
       setTimelineMode('logs');
       state.logs.offset = 0;
       renderReceipts(root);
+    });
+
+    document.getElementById('timeline-runner-filter').addEventListener('change', (event) => {
+      setRunnerFilter(event.target.value);
+      state.receipts.offset = 0;
+      state.logs.offset = 0;
+      if (mode === 'receipts') {
+        loadReceipts();
+      } else {
+        loadUiLogs();
+      }
     });
     
     document.getElementById('filter-apply').addEventListener('click', () => {
@@ -142,11 +166,6 @@
         setReceiptDetailVisibility(!!event.target.checked);
         loadReceipts();
       });
-
-      document.getElementById('filter-runtime-aliases').addEventListener('change', (event) => {
-        setReceiptRuntimeAliasVisibility(!!event.target.checked);
-        loadReceipts();
-      });
     }
     
     if (mode === 'receipts') {
@@ -169,6 +188,9 @@
     if (filters.date) params.set('date', filters.date);
     if (filters.verdict) params.set('verdict', filters.verdict);
     if (filters.q) params.set('q', filters.q);
+    if (state.runnerFilter && state.runnerFilter !== 'all') {
+      params.set('runner', state.runnerFilter);
+    }
     
     try {
       container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
@@ -276,6 +298,7 @@
       container.innerHTML = result.items.map(r => {
         // Get command summary from metadata when debug details are not shown
         const commandSummary = r.action?.metadata?._command_summary || '';
+        const runnerId = String(r.action?.metadata?.runner_id || 'unknown');
         const summaryText = isApprovalResolutionReceipt(r)
           ? approvalSummaryText(r)
           : aliasRuntimeText(r.decision.detail || 'No detail provided');
@@ -291,6 +314,7 @@
             <div class="timeline-body">
               <span class="chip chip-${verdictClass(r.decision.verdict)}">${esc(r.decision.verdict)}</span>
               <span class="chip">${esc(r.decision.reason)}</span>
+              <span class="chip">${esc(runnerId)}</span>
               ${r.zone ? `<span class="chip">${esc(r.zone)}</span>` : ''}
             </div>
             <div class="timeline-details">
@@ -304,6 +328,7 @@
               
               ${showDetails ? `
                 <div class="timeline-operator-details">
+                  <div class="mt-2 form-hint">Runner: <span class="mono">${esc(runnerId)}</span></div>
                   <div class="mt-2 text-muted" style="font-size: 0.875rem; white-space: pre-line;">${esc(detailsText(r))}</div>
                   ${r.diff_summary ? `<div class="mt-2">${formatDiff(r.diff_summary)}</div>` : '<div class="mt-2 form-hint">Diff summary: not available</div>'}
                   <div class="mt-2 form-hint">Command: <span class="mono">${esc(aliasRuntimeText(r.action.process?.command || '-'))}</span></div>
@@ -341,6 +366,9 @@
     if (filters.level) params.set('level', filters.level);
     if (filters.source) params.set('source', filters.source);
     if (filters.q) params.set('q', filters.q);
+    if (state.runnerFilter && state.runnerFilter !== 'all') {
+      params.set('runner', state.runnerFilter);
+    }
 
     try {
       container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
@@ -379,6 +407,7 @@
         const normalizedLevel = String(item.level || 'info').toLowerCase();
         const source = String(item.source || 'ui');
         const details = item.details ? JSON.stringify(item.details, null, 2) : '';
+        const runnerId = String(item?.details?.runner_id || 'unknown');
         return `
           <div class="timeline-item">
             <div class="timeline-marker ${levelClass(normalizedLevel)}">${levelIcon(normalizedLevel)}</div>
@@ -390,6 +419,7 @@
               <div class="timeline-body">
                 <span class="chip chip-${levelClass(normalizedLevel)}">${esc(normalizedLevel)}</span>
                 <span class="chip">${esc(source)}</span>
+                <span class="chip">${esc(runnerId)}</span>
               </div>
               ${details ? `
                 <div class="timeline-details">

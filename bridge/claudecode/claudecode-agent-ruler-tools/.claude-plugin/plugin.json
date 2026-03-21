@@ -1,0 +1,8 @@
+{
+  "name": "agent-ruler-tools",
+  "description": "Agent Ruler governance hooks and managed MCP tools for Claude Code",
+  "author": {
+    "name": "Agent Ruler",
+    "email": "noreply@agent-ruler.local"
+  }
+}

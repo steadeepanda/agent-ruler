@@ -36,17 +36,17 @@ body {
   backdrop-filter: blur(8px);
 }
 
-.VPNavBar .title {
+.VPNavBar .VPNavBarTitle .title {
   font-weight: 700;
   font-size: 1.02rem;
 }
 
-.VPNavBar .title .logo {
+.VPNavBar .VPNavBarTitle .title .logo {
   width: 28px;
   height: 28px;
 }
 
-.VPNavBar .title {
+.VPNavBar .VPNavBarTitle .title {
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-areas:
@@ -57,11 +57,11 @@ body {
   row-gap: 3px;
 }
 
-.VPNavBar .title .logo {
+.VPNavBar .VPNavBarTitle .title .logo {
   grid-area: logo;
 }
 
-.VPNavBar .title span {
+.VPNavBar .VPNavBarTitle .title span {
   grid-area: text;
   display: inline-flex;
   align-items: center;
@@ -69,7 +69,7 @@ body {
   min-width: 0;
 }
 
-.VPNavBar .title span::after {
+.VPNavBar .VPNavBarTitle .title span::after {
   content: "Beta";
   display: inline-flex;
   align-items: center;
@@ -86,7 +86,7 @@ body {
   text-transform: uppercase;
 }
 
-.VPNavBar .title::after {
+.VPNavBar .VPNavBarTitle .title::after {
   content: var(--ar-docs-version-label, "v0.0.0");
   grid-area: version;
   justify-self: start;
@@ -180,11 +180,11 @@ body {
     display: none;
   }
 
-  .VPNavBar .title {
+  .VPNavBar .VPNavBarTitle .title {
     font-size: 0.95rem;
   }
 
-  .VPNavBar .title::after {
+  .VPNavBar .VPNavBarTitle .title::after {
     display: none;
   }
 }

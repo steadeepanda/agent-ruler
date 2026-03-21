@@ -51,6 +51,81 @@ pub(crate) fn set_gateway_mode_local(config: &mut Map<String, Value>) {
     gateway.insert("mode".to_string(), Value::String("local".to_string()));
 }
 
+/// Normalize and enforce managed Telegram streaming for OpenClaw.
+///
+/// Managed Agent Ruler Telegram UX expects assistant replies to surface live and
+/// in-order before approval cards. Keep Telegram draft streaming enabled and
+/// block-streaming disabled for managed homes whenever Telegram is configured
+/// and enabled.
+pub(crate) fn normalize_telegram_streaming_flag(config: &mut Map<String, Value>) -> bool {
+    let Some(channels) = config.get_mut("channels").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let Some(telegram) = channels.get_mut("telegram").and_then(Value::as_object_mut) else {
+        return false;
+    };
+
+    if matches!(telegram.get("enabled"), Some(Value::Bool(false))) {
+        return false;
+    }
+
+    let mut changed = false;
+    if let Some(raw_streaming) = telegram.get("streaming").cloned() {
+        match raw_streaming {
+            Value::String(raw) => {
+                let coerced = coerce_string_bool(&raw);
+                if let Some(flag) = coerced {
+                    telegram.insert("streaming".to_string(), Value::Bool(flag));
+                    changed = true;
+                }
+            }
+            Value::Bool(_) => {}
+            _ => {
+                changed = true;
+            }
+        }
+    };
+    if telegram.get("streaming").and_then(Value::as_bool) != Some(true) {
+        telegram.insert("streaming".to_string(), Value::Bool(true));
+        changed = true;
+    }
+    if let Some(raw_block_streaming) = telegram.get("blockStreaming").cloned() {
+        match raw_block_streaming {
+            Value::String(raw) => {
+                let coerced = coerce_string_bool(&raw);
+                if let Some(flag) = coerced {
+                    telegram.insert("blockStreaming".to_string(), Value::Bool(flag));
+                    changed = true;
+                }
+            }
+            Value::Bool(_) => {}
+            _ => {
+                changed = true;
+            }
+        }
+    }
+    if telegram.get("blockStreaming").and_then(Value::as_bool) != Some(false) {
+        telegram.insert("blockStreaming".to_string(), Value::Bool(false));
+        changed = true;
+    }
+
+    let agents = ensure_object(config, "agents");
+    let defaults = ensure_object(agents, "defaults");
+    if defaults
+        .get("blockStreamingDefault")
+        .and_then(Value::as_str)
+        != Some("off")
+    {
+        defaults.insert(
+            "blockStreamingDefault".to_string(),
+            Value::String("off".to_string()),
+        );
+        changed = true;
+    }
+
+    changed
+}
+
 /// Disable the session-memory hook for non-Anthropic provider defaults.
 ///
 /// This preserves startup behavior for providers where the hook is not
@@ -236,8 +311,19 @@ fn ensure_string_in_array(values: &mut Vec<Value>, target: &str) {
     values.push(Value::String(target.to_string()));
 }
 
+fn coerce_string_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Some(true),
+        "off" | "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use super::normalize_telegram_streaming_flag;
     use super::runner_api_base_url;
 
     #[test]
@@ -251,5 +337,64 @@ mod tests {
     #[test]
     fn runner_api_base_url_uses_loopback_for_wildcard_bind() {
         assert_eq!(runner_api_base_url("0.0.0.0:4750"), "http://127.0.0.1:4750");
+    }
+
+    #[test]
+    fn normalize_telegram_streaming_enables_live_streaming_when_false() {
+        let mut cfg = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "streaming": false,
+                    "blockStreaming": true
+                }
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("config should be object");
+        assert!(normalize_telegram_streaming_flag(&mut cfg));
+        let parsed = serde_json::Value::Object(cfg);
+        assert_eq!(
+            parsed
+                .pointer("/channels/telegram/streaming")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed
+                .pointer("/channels/telegram/blockStreaming")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            parsed
+                .pointer("/agents/defaults/blockStreamingDefault")
+                .and_then(serde_json::Value::as_str),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn normalize_telegram_streaming_preserves_disabled_channel() {
+        let mut cfg = json!({
+            "channels": {
+                "telegram": {
+                    "enabled": false,
+                    "streaming": false
+                }
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("config should be object");
+        assert!(!normalize_telegram_streaming_flag(&mut cfg));
+        let parsed = serde_json::Value::Object(cfg);
+        assert_eq!(
+            parsed
+                .pointer("/channels/telegram/streaming")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 }

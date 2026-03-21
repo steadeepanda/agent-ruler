@@ -38,10 +38,32 @@ impl ConfinementBackend {
 ///
 /// When such errors are detected, the system may fall back to degraded mode.
 pub fn is_confinement_env_error(stderr: &str) -> bool {
-    stderr.contains("Operation not permitted")
-        || stderr.contains("Failed RTM_NEWADDR")
-        || stderr.contains("setting up uid map")
-        || stderr.contains("uid map")
-        || stderr.contains("bubblewrap")
-        || stderr.contains("setns")
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("operation not permitted")
+        || lowered.contains("failed rtm_newaddr")
+        || lowered.contains("setting up uid map")
+        || lowered.contains("uid map")
+        || lowered.contains("bubblewrap")
+        || lowered.contains("bwrap:")
+        || lowered.contains("setns")
+        || (lowered.contains("bwrap") && lowered.contains("permission denied"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_confinement_env_error;
+
+    #[test]
+    fn detects_uppercase_uid_map_variant() {
+        assert!(is_confinement_env_error(
+            "bwrap: setting up UID map: Permission denied"
+        ));
+    }
+
+    #[test]
+    fn detects_generic_bwrap_permission_denied_variant() {
+        assert!(is_confinement_env_error(
+            "bwrap: Permission denied while configuring namespace"
+        ));
+    }
 }

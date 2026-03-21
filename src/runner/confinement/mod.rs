@@ -47,6 +47,7 @@ pub use common::{is_confinement_env_error, ConfinementBackend};
 #[cfg(target_os = "linux")]
 pub use linux::{
     build_confined_command as build_bwrap_command, is_available as is_linux_available,
+    probe_runtime_availability as probe_linux_runtime_availability,
 };
 
 #[cfg(target_os = "windows")]

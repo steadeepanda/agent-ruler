@@ -7,6 +7,10 @@ Bridge assets are now runner-scoped so future runners can ship isolated adapters
 - `bridge/openclaw/channel_bridge.py` - OpenClaw approval channel bridge runtime
 - `bridge/openclaw/approvals-hook/` - inbound hook pack (`agent-ruler-approvals`)
 - `bridge/openclaw/openclaw-agent-ruler-tools/` - OpenClaw tools adapter plugin
+- `bridge/claudecode/channels/telegram/channel_bridge.py` - Claude Code Telegram bridge wrapper
+- `bridge/opencode/channels/telegram/channel_bridge.py` - OpenCode Telegram bridge wrapper
+- `bridge/claudecode/skills/agent-ruler-safe-runtime.md` - Claude Code safe runtime guidance
+- `bridge/opencode/skills/agent-ruler-safe-runtime.md` - OpenCode safe runtime guidance
 - `bridge/openclaw/samples/` - inbound payload samples
 - `bridge/openclaw/smoke_replay.py` - local bridge smoke replay
 - `bridge/openclaw/tests/` - bridge parser/runtime tests

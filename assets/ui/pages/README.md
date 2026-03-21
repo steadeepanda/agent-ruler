@@ -13,5 +13,6 @@ Each tab is now split into a focused file so page content can be edited in one p
   - `configuration/execution-layer.js`
 - Monitoring
   - `monitoring/receipts.js`
+  - `monitoring/runners.js`
 
 The include order is defined in `src/helpers/ui/pages.rs`.

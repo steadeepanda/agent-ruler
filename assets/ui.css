@@ -851,6 +851,70 @@ body.sidebar-collapsed .nav-item-badge {
   flex: 1 1 auto;
 }
 
+.panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.panel-tab {
+  border: 1px solid var(--content-border);
+  border-radius: var(--radius);
+  background: var(--content-bg-alt);
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.panel-tab:hover {
+  background: var(--content-bg);
+  color: var(--text-primary);
+}
+
+.panel-tab.active {
+  background: var(--brand-primary);
+  border-color: var(--brand-primary);
+  color: white;
+}
+
+.settings-tab-copy {
+  font-size: 0.87rem;
+  color: var(--text-muted);
+  margin-bottom: var(--space-3);
+}
+
+.settings-save-row {
+  margin-top: var(--space-4);
+}
+
+.id-list-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  align-items: stretch;
+}
+
+.id-list-controls .btn {
+  white-space: nowrap;
+}
+
+.id-list-container {
+  max-height: 240px;
+}
+
+.id-list-item {
+  background: var(--content-bg);
+}
+
+.runners-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 /* Tables */
 .table-container {
   overflow-x: auto;
@@ -1855,6 +1919,21 @@ body.sidebar-collapsed .nav-item-badge {
     min-width: 0;
     max-width: none;
     width: 100%;
+  }
+
+  .panel-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: var(--space-1);
+  }
+
+  .panel-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .id-list-controls {
+    grid-template-columns: 1fr;
   }
 }
 

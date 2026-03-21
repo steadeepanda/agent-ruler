@@ -2,6 +2,7 @@
 
 Local OpenClaw plugin that exposes deterministic Agent Ruler tools:
 
+- `agent_ruler_capabilities`
 - `agent_ruler_status_feed`
 - `agent_ruler_wait_for_approval`
 - `agent_ruler_request_export_stage`
@@ -11,6 +12,8 @@ Local OpenClaw plugin that exposes deterministic Agent Ruler tools:
 The plugin also registers a `before_tool_call` hook for core file/exec tools (`write/edit/delete/move/read/exec`) and asks Agent Ruler for preflight policy decisions so blocked actions show up in receipts/timeline with reason codes.
 When preflight returns `pending_approval`, the hook automatically waits for resolution (bounded timeout) and resumes the blocked tool call after approval.
 If preflight API calls are unavailable, the hook fails closed (blocks the tool call) to preserve policy enforcement.
+Agents should read `agent_ruler_capabilities` before boundary operations and use the runtime contract it returns instead of guessing paths or approval semantics.
+For delivery requests, `dst` is optional. When user destination is not explicitly specified, omit `dst` so Agent Ruler uses the runtime default user destination directory.
 
 Recommended companion skill text:
 

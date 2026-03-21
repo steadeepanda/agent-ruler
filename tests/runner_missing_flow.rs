@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use agent_ruler::config::{init_layout, load_runtime, save_config, CONFIG_FILE_NAME};
+use agent_ruler::runners::{RunnerAssociation, RunnerKind, RunnerMissingState};
 use serde_json::Value;
 
 use common::TestRuntimeDir;
@@ -74,6 +76,32 @@ fn configure_runner(project_root: &Path, runtime_dir: &Path) {
         Value::Bool(true),
         "setup test-mode should mark selected runner as missing/unavailable"
     );
+}
+
+fn configure_runner_kind(project_root: &Path, runtime_dir: &Path, kind: RunnerKind) {
+    init_layout(project_root, Some(runtime_dir), None, true).expect("init runtime");
+    let mut runtime = load_runtime(project_root, Some(runtime_dir)).expect("load runtime");
+
+    let runner_root = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join(kind.id());
+    let managed_home = runner_root.join("home");
+    let managed_workspace = runner_root.join("workspace");
+    std::fs::create_dir_all(&managed_home).expect("create managed home");
+    std::fs::create_dir_all(&managed_workspace).expect("create managed workspace");
+
+    runtime.config.runner = Some(RunnerAssociation {
+        kind,
+        managed_home,
+        managed_workspace,
+        integrations: Vec::new(),
+        missing: RunnerMissingState::default(),
+    });
+    let config_path = runtime.config.state_dir.join(CONFIG_FILE_NAME);
+    save_config(&config_path, &runtime.config).expect("save runner config");
 }
 
 #[test]
@@ -195,5 +223,59 @@ fn run_fails_only_when_missing_runner_is_required() {
     assert!(
         stderr.contains("runner `openclaw` is not available"),
         "missing-runner error should be explicit\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn run_fails_for_missing_claudecode_runner_when_command_targets_claude() {
+    let project = TestRuntimeDir::new("runner-missing-claude-required-project");
+    let runtime = TestRuntimeDir::new("runner-missing-claude-required-runtime");
+    let missing_path_dir = TestRuntimeDir::new("runner-missing-claude-required-path");
+
+    configure_runner_kind(project.path(), runtime.path(), RunnerKind::Claudecode);
+
+    let run = Command::new(bin_path())
+        .current_dir(project.path())
+        .arg("--runtime-dir")
+        .arg(runtime.path())
+        .args(["run", "--", "claude", "--help"])
+        .env("PATH", missing_path_dir.path())
+        .output()
+        .expect("run claude through runner");
+    assert!(
+        !run.status.success(),
+        "run should fail when configured claudecode executable is missing"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("runner `claude` is not available"),
+        "missing-runner error should mention claude\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn run_fails_for_missing_opencode_runner_when_command_targets_opencode() {
+    let project = TestRuntimeDir::new("runner-missing-opencode-required-project");
+    let runtime = TestRuntimeDir::new("runner-missing-opencode-required-runtime");
+    let missing_path_dir = TestRuntimeDir::new("runner-missing-opencode-required-path");
+
+    configure_runner_kind(project.path(), runtime.path(), RunnerKind::Opencode);
+
+    let run = Command::new(bin_path())
+        .current_dir(project.path())
+        .arg("--runtime-dir")
+        .arg(runtime.path())
+        .args(["run", "--", "opencode", "--help"])
+        .env("PATH", missing_path_dir.path())
+        .output()
+        .expect("run opencode through runner");
+    assert!(
+        !run.status.success(),
+        "run should fail when configured opencode executable is missing"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("runner `opencode` is not available"),
+        "missing-runner error should mention opencode\nstderr={stderr}"
     );
 }

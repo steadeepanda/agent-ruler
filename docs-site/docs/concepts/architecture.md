@@ -1,21 +1,21 @@
 ---
 title: Architecture
 ---
-
-> Synced automatically from `docs/architecture.md`. Edit the source file and run `npm --prefix docs-site run docs:sync`.
-# Agent Ruler v0.1.7 Architecture (Linux-first)
+# Agent Ruler v0.1.8 Architecture (Linux-first)
 
 ## 1. Scope and Security Objectives
 
 Agent Ruler is a **deterministic reference monitor** plus **confinement runner** for AI agents. It contains no LLM logic in policy decisions—enforcement is purely rule-based and deterministic.
 
-### Primary v0.1.7 Objectives
+### Primary v0.1.8 Objectives
 
 - **Deterministic decisioning** with stable reason codes
 - **Detached enforcement** when processes are launched through Agent Ruler
 - **Confinement-first controls** for filesystem + network + execution
 - **Approval pipeline** for sensitive transitions
 - **Low-operator-friction workflows** (import, stage, deliver) with explicit audit receipts
+- **Multi-runner parity** across OpenClaw, Claude Code, and OpenCode integrations
+- **Bridge/channel extensibility** with runtime-managed per-runner bridge config
 - **OWASP-aligned prompt injection defenses** via capability controls
 
 ### Design Principles
@@ -44,7 +44,7 @@ Agent Ruler is a **deterministic reference monitor** plus **confinement runner**
 | Tool misuse | Using available tools for destructive purposes | Operation-level guards, mass action limits |
 | Multi-step attacks | Chained fetch→write→exec→persist or fetch→read→exfil | Independent step validation |
 
-### Out-of-Scope in v0.1.7
+### Out-of-Scope in v0.1.8
 
 | Limitation | Reason | Mitigation |
 |------------|--------|------------|
@@ -52,7 +52,7 @@ Agent Ruler is a **deterministic reference monitor** plus **confinement runner**
 | Privileged local attacker with root | Root can bypass namespace isolation | Defense-in-depth, audit logging |
 | Syscall-complete mediation without kernel hooks | Operating at process/command level | Multiple independent controls |
 | Memory-based exfiltration (shared memory, pipes) | Outside current interception layer | Network/filesystem focused |
-| Timing/side-channel attacks | Different threat category | Not addressed in v0.1.7 |
+| Timing/side-channel attacks | Different threat category | Not addressed in v0.1.8 |
 
 ---
 
@@ -76,7 +76,9 @@ runtime-root/
 ├── workspace/           # Zone 0: Agent working directory (RW)
 ├── shared-zone/         # Zone 2: Staged exports (approval required)
 ├── user_data/
-│   └── logs/            # Managed runner/bridge logs
+│   ├── logs/            # Managed runner/bridge logs
+│   ├── runners/         # Runner-managed homes/workspaces (Claude/OpenCode + others)
+│   └── bridge/          # Generated bridge channel configs/state
 ├── state/
 │   ├── config.yaml      # Runtime configuration
 │   ├── policy.yaml      # Policy definition
@@ -94,7 +96,7 @@ runtime-root/
 ### User-Facing Delivery Default
 
 ```
-~/Documents/agent-ruler-deliveries/<project-name>/
+~/Documents/agent-ruler-deliveries/
 ```
 
 ### Manual Override
@@ -135,11 +137,17 @@ agent-ruler --runtime-dir /custom/path run <cmd>
 │  • Bubblewrap confinement setup                                  │
 │  • Preflight interception (rm, mv, network, interpreters)        │
 │  • Command wrapping and execution                                │
+│  • Runner adapters: OpenClaw, Claude Code, OpenCode              │
 ├─────────────────────────────────────────────────────────────────┤
 │  Transfer Gate (export_gate.rs + staged_exports.rs)              │
 │  • Import: external → workspace                                  │
 │  • Stage: workspace → shared-zone                                │
 │  • Deliver: shared-zone → user destination                       │
+├─────────────────────────────────────────────────────────────────┤
+│  Bridge Layer (bridge/* + *_bridge.rs)                           │
+│  • Runtime-managed channel bridge configs                         │
+│  • Optional operator notifications/decisions transport            │
+│  • Approval state still resolved by Agent Ruler API               │
 └─────────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -332,7 +340,7 @@ If bubblewrap fails (e.g., uid-map/RTM_NEWADDR errors):
 ┌─────────────────────────────────────────────────────────────┐
 │              Reserved (Future)                              │
 │  • Download byte-size denial reason exists in model         │
-│  • Byte-size enforcement not wired in v0.1.7                │
+│  • Byte-size enforcement not wired in v0.1.8                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -463,7 +471,7 @@ When quarantine is triggered:
 - Never spam elevation prompts
 - Bulk approval available with confirmation
 - Arbitrary `sudo` passthrough is denied.
-- Supported v0.1.7 mediated verb: `install_packages` (`sudo apt install ...` / `sudo apt-get install ...`).
+- Supported v0.1.8 mediated verb: `install_packages` (`sudo apt install ...` / `sudo apt-get install ...`).
 - Elevation requests are converted to deterministic approval records (`approval_required_elevation`).
 - On approval, a narrow elevated helper executes fixed args only (no shell), with:
   - allowlisted package checks,
@@ -581,7 +589,7 @@ When quarantine is triggered:
 
 ---
 
-## 14. Known v0.1.7 Limitations
+## 14. Known v0.1.8 Limitations
 
 | Limitation | Impact | Mitigation |
 |------------|--------|------------|
@@ -630,6 +638,8 @@ src/
 ├── ui.rs                     # Web UI HTTP server and routing
 ├── agent_ruler.rs            # High-level orchestration API
 ├── openclaw_bridge.rs        # OpenClaw bridge config model + generated config helpers
+├── claudecode_bridge.rs      # Claude Code bridge config model + generated config helpers
+├── opencode_bridge.rs        # OpenCode bridge config model + generated config helpers
 ├── utils.rs                  # Shared utilities
 │
 ├── cli/                      # CLI command implementations
@@ -661,7 +671,10 @@ src/
 │   │   └── actions.rs        # Import/export/deliver actions
 │   └── ui/                   # UI API handlers
 │       ├── mod.rs
+│       ├── claudecode_tool_preflight.rs # Claude Code compatibility endpoint
 │       ├── openclaw_tool_preflight.rs # OpenClaw tool preflight guard
+│       ├── opencode_tool_preflight.rs # OpenCode compatibility endpoint
+│       ├── runner_tool_preflight_common.rs # Shared runner preflight logic
 │       ├── pages.rs          # Page data assembly
 │       ├── payloads.rs       # Request/response types
 │       ├── runtime_api.rs    # Runtime configuration API
@@ -676,7 +689,9 @@ src/
 │
 ├── runners/                  # Managed runner lifecycle adapters
 │   ├── mod.rs
-│   └── openclaw.rs
+│   ├── openclaw.rs
+│   ├── claudecode.rs
+│   └── opencode.rs
 │
 └── runner/                   # Command execution and confinement
     ├── mod.rs                # run_confined() orchestration + RunResult
@@ -705,7 +720,11 @@ src/
 | `ui.rs` | HTTP server | UI endpoints and routing |
 | `helpers/ui/` | UI API handlers | Request/response handling |
 | `runners/openclaw.rs` | Managed OpenClaw lifecycle and config guards | `OpenClawAdapter` |
+| `runners/claudecode.rs` | Managed Claude Code lifecycle and auth/permissions guards | `ClaudeCodeAdapter` |
+| `runners/opencode.rs` | Managed OpenCode lifecycle and runtime-path guards | `OpenCodeAdapter` |
 | `openclaw_bridge.rs` | OpenClaw bridge config normalization | `OpenClawBridgeConfig` |
+| `claudecode_bridge.rs` | Claude Code bridge config normalization | `TelegramBridgeConfig` |
+| `opencode_bridge.rs` | OpenCode bridge config normalization | `TelegramBridgeConfig` |
 
 ### Key Data Flows
 

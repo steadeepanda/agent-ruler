@@ -5,10 +5,12 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config::RuntimeState;
 use crate::export_gate::{commit_export, ExportPlan};
+use crate::runners::{RunnerKind, RUNTIME_RUNNERS_DIR_NAME, RUNTIME_USER_DATA_DIR_NAME};
 use crate::staged_exports::StagedExportStore;
 
 const BYPASS_ACK_HINT: &str =
     "bypass refused: include bypass_ack=true to acknowledge policy bypass and reduced audit";
+const RUNNER_WORKSPACE_SUBDIR: &str = "workspace";
 
 pub fn resolve_ui_path_update(base: &Path, raw: &str, absolute: bool) -> PathBuf {
     let path = PathBuf::from(raw.trim());
@@ -19,12 +21,52 @@ pub fn resolve_ui_path_update(base: &Path, raw: &str, absolute: bool) -> PathBuf
     }
 }
 
-pub fn resolve_workspace_src(runtime: &RuntimeState, src: &str) -> PathBuf {
+pub fn workspace_root_for_runner(runtime: &RuntimeState, runner: Option<RunnerKind>) -> PathBuf {
+    let selected = runner.or_else(|| runtime.config.runner.as_ref().map(|item| item.kind));
+    let Some(kind) = selected else {
+        return runtime.config.workspace.clone();
+    };
+
+    if let Some(configured) = runtime
+        .config
+        .runner
+        .as_ref()
+        .filter(|item| item.kind == kind)
+    {
+        return configured.managed_workspace.clone();
+    }
+
+    match kind {
+        RunnerKind::Openclaw => runtime.config.workspace.clone(),
+        RunnerKind::Claudecode | RunnerKind::Opencode => runtime
+            .config
+            .runtime_root
+            .join(RUNTIME_USER_DATA_DIR_NAME)
+            .join(RUNTIME_RUNNERS_DIR_NAME)
+            .join(kind.id())
+            .join(RUNNER_WORKSPACE_SUBDIR),
+    }
+}
+
+pub fn workspace_root_for_runner_id(
+    runtime: &RuntimeState,
+    runner_id: Option<&str>,
+) -> Result<PathBuf> {
+    let kind = normalize_requested_runner(runner_id)?;
+    Ok(workspace_root_for_runner(runtime, kind))
+}
+
+pub fn resolve_workspace_src(
+    runtime: &RuntimeState,
+    src: &str,
+    runner_id: Option<&str>,
+) -> Result<PathBuf> {
+    let workspace_root = workspace_root_for_runner_id(runtime, runner_id)?;
     let path = PathBuf::from(src);
     if path.is_absolute() {
-        path
+        Ok(path)
     } else {
-        runtime.config.workspace.join(path)
+        Ok(workspace_root.join(path))
     }
 }
 
@@ -66,18 +108,12 @@ pub fn resolve_stage_reference(
     }
 
     if let Some(record) = staged_store.get(stage_ref)? {
-        return Ok((Some(record.id), PathBuf::from(record.staged_path)));
+        let staged_path = normalize_stage_reference_path(runtime, Path::new(&record.staged_path))?;
+        return Ok((Some(record.id), staged_path));
     }
 
     let input = PathBuf::from(stage_ref);
-    if !input.is_absolute() {
-        ensure_relative_subpath(&input, "stage reference")?;
-    }
-    let staged_path = if input.is_absolute() {
-        input
-    } else {
-        runtime.config.shared_zone_dir.join(input)
-    };
+    let staged_path = normalize_stage_reference_path(runtime, &input)?;
 
     if let Some(record) = staged_store.find_by_staged_path(&staged_path)? {
         return Ok((Some(record.id), staged_path));
@@ -123,25 +159,27 @@ pub fn resolve_import_dst(
     runtime: &RuntimeState,
     dst: Option<&str>,
     src: &Path,
+    runner_id: Option<&str>,
 ) -> Result<PathBuf> {
+    let workspace_root = workspace_root_for_runner_id(runtime, runner_id)?;
     let dst = match dst {
         Some(dst) => {
             let path = PathBuf::from(dst);
             if path.is_absolute() {
                 path
             } else {
-                runtime.config.workspace.join(path)
+                workspace_root.join(path)
             }
         }
         None => {
             let file_name = src
                 .file_name()
                 .ok_or_else(|| anyhow!("import source has no file name"))?;
-            runtime.config.workspace.join(file_name)
+            workspace_root.join(file_name)
         }
     };
 
-    if !dst.starts_with(&runtime.config.workspace) {
+    if !dst.starts_with(&workspace_root) {
         return Err(anyhow!(
             "import destination must stay within workspace: {}",
             dst.display()
@@ -213,4 +251,46 @@ fn ensure_relative_subpath(path: &Path, label: &str) -> Result<()> {
 fn has_parent_component(path: &Path) -> bool {
     path.components()
         .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn normalize_stage_reference_path(runtime: &RuntimeState, input: &Path) -> Result<PathBuf> {
+    if input.is_absolute() {
+        if has_parent_component(input) || !input.starts_with(&runtime.config.shared_zone_dir) {
+            return Err(anyhow!(
+                "stage reference must stay within shared zone: {}",
+                runtime.config.shared_zone_dir.display()
+            ));
+        }
+        Ok(input.to_path_buf())
+    } else {
+        ensure_relative_subpath(input, "stage reference")?;
+        Ok(runtime.config.shared_zone_dir.join(input))
+    }
+}
+
+fn normalize_requested_runner(runner_id: Option<&str>) -> Result<Option<RunnerKind>> {
+    let trimmed = runner_id.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("all")
+        || trimmed.eq_ignore_ascii_case("current")
+        || trimmed.eq_ignore_ascii_case("selected")
+    {
+        return Ok(None);
+    }
+
+    match RunnerKind::from_id(trimmed) {
+        Some(kind) => Ok(Some(kind)),
+        None => Err(anyhow!(
+            "runner must be one of: {}",
+            [
+                RunnerKind::Openclaw,
+                RunnerKind::Claudecode,
+                RunnerKind::Opencode
+            ]
+            .into_iter()
+            .map(RunnerKind::id)
+            .collect::<Vec<_>>()
+            .join("|")
+        )),
+    }
 }

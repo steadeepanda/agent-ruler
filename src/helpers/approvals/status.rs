@@ -21,6 +21,7 @@ pub fn redacted_status_event(
         verdict: approval_status_slug(approval.status).to_string(),
         reason_code: reason_code_slug(approval.reason),
         category: approval_category(approval).to_string(),
+        runner_id: approval_runner_id(approval),
         session_hint: approval_session_hint(approval),
         target_classification: approval_target_classification(engine, approval),
         guidance: approval_guidance(approval),
@@ -100,6 +101,13 @@ fn approval_guidance(approval: &ApprovalRecord) -> String {
 }
 
 fn approval_session_hint(approval: &ApprovalRecord) -> Option<String> {
+    let ruler_session_label = approval
+        .action
+        .metadata
+        .get("ruler_session_label")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let agent = approval
         .action
         .metadata
@@ -114,6 +122,21 @@ fn approval_session_hint(approval: &ApprovalRecord) -> Option<String> {
         .map(String::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    if let Some(label) = ruler_session_label {
+        return match (agent, session) {
+            (Some(agent_id), Some(session_key)) => {
+                let compact = truncate_session_hint(session_key, 24);
+                Some(format!("agent={agent_id} session={compact} linked={label}"))
+            }
+            (Some(agent_id), None) => Some(format!("agent={agent_id} linked={label}")),
+            (None, Some(session_key)) => {
+                let compact = truncate_session_hint(session_key, 24);
+                Some(format!("session={compact} linked={label}"))
+            }
+            (None, None) => Some(label.to_string()),
+        };
+    }
 
     match (agent, session) {
         (Some(agent_id), Some(session_key)) => {
@@ -134,4 +157,15 @@ fn truncate_session_hint(value: &str, max_len: usize) -> String {
         return value.to_string();
     }
     format!("{}...", &value[..max_len])
+}
+
+fn approval_runner_id(approval: &ApprovalRecord) -> Option<String> {
+    approval
+        .action
+        .metadata
+        .get("runner_id")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }

@@ -9,7 +9,7 @@ To be honest I took long before deciding to publish it.
 I used to keep everything I create for myself 🫣, it wasn't long ago when I decided to be Steadee, go public and share with the world.
 
 
-If you want the full story (and get the vibe), read: **[about this project](./about%20this%20project.md)**.
+If you want the full story (and get the vibe), read: **[about this project](./about-this-project.md)**.
 
 
 ---
@@ -21,9 +21,9 @@ If you want the full story (and get the vibe), read: **[about this project](./ab
 - **Approval gates** for real risk boundaries (network, export/delivery, elevation, sensitive writes)
 - **Receipts + redacted status feed** for auditability and safe polling
 - **Local Control Panel UI**: `/`, `/approvals`, `/receipts`, `/policy`, `/runtime`, `/settings`
-- **Runner integration (OpenClaw today)** with managed runtime separation
+- **Runner integration** for OpenClaw, Claude Code, and OpenCode with parity governance wiring
 - **Tools adapter** for wait/resume flows (agents can pause on approvals instead of crashing)
-- **Optional channel bridge** for approvals (Telegram tested; WhatsApp/Discord not yet tested)
+- **Optional channel bridge** for approvals and Telegram threaded sessions across OpenClaw, Claude Code, and OpenCode
 
 ---
 
@@ -32,16 +32,18 @@ If you want the full story (and get the vibe), read: **[about this project](./ab
 <details>
 <summary><strong>Control Panel WebUI Gallery</strong></summary>
 
-Screenshots below show the main operator surfaces: overview, approvals, import/export, policy, runtime paths, settings, execution layer, and timeline.
+Screenshots below show the main operator surfaces: overview, approvals, import/export, policy, runtime paths, settings, execution layer, timeline, runners, and docs home.
 
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-26-47.png" alt="Agent Ruler Control Panel overview page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-26-52.png" alt="Agent Ruler Control Panel approvals page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-04.png" alt="Agent Ruler Control Panel import export page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-16.png" alt="Agent Ruler Control Panel policy page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-27-48.png" alt="Agent Ruler Control Panel runtime paths page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-28-19.png" alt="Agent Ruler Control Panel settings page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-28-35.png" alt="Agent Ruler Control Panel execution layer page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/Screenshot%20from%202026-03-02%2019-30-02.png" alt="Agent Ruler Control Panel timeline page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-overview.png" alt="Agent Ruler Control Panel overview page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-approvals.png" alt="Agent Ruler Control Panel approvals page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-import-export.png" alt="Agent Ruler Control Panel import export page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-policy.png" alt="Agent Ruler Control Panel policy page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-runtime-paths.png" alt="Agent Ruler Control Panel runtime paths page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-settings.png" alt="Agent Ruler Control Panel settings page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-execution-layer.png" alt="Agent Ruler Control Panel execution layer page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-timeline.png" alt="Agent Ruler Control Panel timeline page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-runners-full.png" alt="Agent Ruler Control Panel runners page" width="900" />
+<img src="docs-site/docs/public/images/control-webui/control-docs-home.png" alt="Agent Ruler documentation home page" width="900" />
 
 </details>
 
@@ -49,14 +51,17 @@ Screenshots below show the main operator surfaces: overview, approvals, import/e
 <summary><strong>Live Channel Workflow Demo (Telegram)</strong></summary>
 
 This demo shows a small end-to-end transfer flow where an agent-side workspace file is mediated through Agent Ruler and delivered to the user destination with channel-assisted operator decisions.
+Demo context: recorded with OpenClaw on release `v0.1.7`.
 
-<img src="docs-site/docs/public/images/telegram-transfert-task0a-01.png" alt="Telegram workflow demo step 1" width="450" />
-<img src="docs-site/docs/public/images/telegram-transfert-task0a-02.png" alt="Telegram workflow demo step 2" width="450" />
-<img src="docs-site/docs/public/images/telegram-transfert-task0a-03.png" alt="Telegram workflow demo step 3" width="450" />
+<img src="docs-site/docs/public/images/telegram-live-showcase-01.jpg" alt="Telegram workflow demo step 1" width="450" />
+<img src="docs-site/docs/public/images/telegram-live-showcase-02.jpg" alt="Telegram workflow demo step 2" width="450" />
+<img src="docs-site/docs/public/images/telegram-live-showcase-03.jpg" alt="Telegram workflow demo step 3" width="450" />
+<img src="docs-site/docs/public/images/telegram-live-showcase-04.jpg" alt="Telegram workflow demo step 4" width="450" />
 
 </details>
 
 ---
+
 ## Threat Model (And What It Does Not Do)
 
 The Ruler (yeah that's how I call it, I don't like too much formalities so when you see Ruler I mean Agent Ruler) is built to reduce damage from **prompt injection** and “xyz deleted my files da*n!” moments 👀 by enforcing boundaries **outside the model**.
@@ -72,13 +77,31 @@ You still need basic host hygiene and good judgment on approvals. The Ruler’s 
 
 ## Quickstart
 
-Note: I do also recommend to setup OpenClaw outside the Ruler then you can import the configuration during setup, inside the Ruler. Why? Because this allows you to have a safe backup/snapshot where you can constently recreate a new OpenClaw from. 
+Please note that the developer path is mainly for contributors and advanced users it's not recommended for
+normal users.
+
+Note: I recommend setting up your preferred runner outside the Ruler first, then importing/configuring it in `agent-ruler setup`. This gives you a clean host-side baseline that is easy to recreate if needed.
 
 It also supports Tailscale Network so if you have a tailscale account make sure it's setup so the Ruler will detect it during installation. This will help you accessing the dashboard from anywhere with any machine within your network, I recommend it.
 
 ### 1) Install (release install, Linux)
 
-Option A (recommended/manual): Download + verify + run
+Option A (recommended/fast): installer script
+
+One-liner variant:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh" | bash -s -- --release
+```
+
+Safer script variant (if you want to inspect before running):
+
+```bash
+curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh"
+bash install.sh --release
+```
+
+Option B (manual): Download + verify + run
 
 ```bash
 # 1) Download release asset + checksums
@@ -105,21 +128,6 @@ if [[ -d docs-site ]]; then
 fi
 ln -sfn "$HOME/.local/share/agent-ruler/installs/vX.Y.Z/agent-ruler" "$HOME/.local/bin/agent-ruler"
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Option B (installer script): convenient release install 
-
-One-liner variant:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh" | bash -s -- --release
-```
-
-Safer script variant (if you want to inspect before running):
-
-```bash
-curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh"
-bash install.sh --release
 ```
 
 Private repo/fork install vars (optional):
@@ -159,17 +167,30 @@ agent-ruler setup
 
 ### 4) Run your runner through Agent Ruler
 
+Native runner commands are supported: use the runner's normal command shape, just prefixed with `agent-ruler run --`.
+
 ```bash
 agent-ruler run -- openclaw gateway
+agent-ruler run -- claude
+agent-ruler run -- opencode
+# optional web launcher mode
+agent-ruler run -- opencode web
 ```
+
+Runner note:
+- OpenClaw, Claude Code, and OpenCode all run under the same Agent Ruler governance model.
+- OpenCode now follows the same Agent Ruler "rules of living" and boundary workflow expectations as OpenClaw and Claude Code.
+
+Quick stop shortcuts:
+- `agent-ruler stop ui`
+- `agent-ruler stop run -- openclaw`
+- `agent-ruler stop run -- claudecode`
+- `agent-ruler stop run -- opencode`
 
 ### 5) Open Control Panel
 
-```bash
-agent-ruler ui
-```
-
-Then open: `http://127.0.0.1:4622`
+When you start a runner with `agent-ruler run -- ...`, Agent Ruler starts/maintains the Control Panel automatically.
+Use the Control Panel URL printed in the terminal. Default fallback is `http://127.0.0.1:4622` when no Tailscale IP is configured.
 
 ---
 
@@ -184,7 +205,7 @@ You’ll see this pattern everywhere:
 Diagram:
 <div style="display:flex; justify-content:center; width:100%;">
   <img
-    src="docs-site/docs/public/images/agent-ruler-approval-flow.svg"
+    src="docs-site/docs/public/images/agent-ruler-approval-flow-updated.png"
     alt="Agent Ruler boundary and approval flow"
     style="max-width:900px; width:100%; height:auto;"
   />
@@ -213,18 +234,23 @@ The canonical user surface remains the **local Control Panel WebUI**.
 
 ## Requirements and Tooling
 
-### Required
+### User requirements
 - Linux host
 - `bubblewrap` (`bwrap --version`)
+- One supported runner installed on host:
+  - OpenClaw, Claude Code, or OpenCode
 
-### Optional (depending on workflow)
+Note: Set up your preferred runner outside the Ruler first, then import/configure it during setup. This keeps a clean host baseline you can recreate when needed.
+
+### Developer requirements (optional)
 - Rust toolchain (`cargo`, `rustc`) for `--local` developer installs
-- OpenClaw installed on host (runner workflow)
-
-Note: I do also recommend to setup OpenClaw outside the Ruler then you can import the configuration during setup, inside the Ruler. Why? Because this allows you to have a safe backup/snapshot where you can constently recreate a new OpenClaw from.
-
 - Node.js + npm (docs-site build/sync)
 - Python 3 (channel bridge runtime/scripts)
+
+Notes:
+- `docs-site/docs/.vitepress/dist` is generated and not committed.
+- CI builds docs before tests/release packaging.
+- For source/dev runs, if docs are stale or missing, run `npm --prefix docs-site run docs:build`.
 
 ---
 
@@ -232,7 +258,7 @@ Note: I do also recommend to setup OpenClaw outside the Ruler then you can impor
 
 - GitHub: https://github.com/steadeepanda  
 - X: https://x.com/steadeepanda  
-- Docs (in-app): `http://127.0.0.1:4622/help/`
+- Documentation: open the `Documentation` tab inside the Control Panel.
 
 ---
 

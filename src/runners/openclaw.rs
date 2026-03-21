@@ -18,7 +18,8 @@ use serde_json::{Map, Value};
 use crate::config::{AppConfig, RuntimeState};
 use crate::helpers::runners::openclaw::setup_config::{
     apply_tools_adapter_config, disable_session_memory_hook_for_non_anthropic,
-    merge_imported_sections, runner_api_base_url, set_gateway_mode_local, set_workspace,
+    merge_imported_sections, normalize_telegram_streaming_flag, runner_api_base_url,
+    set_gateway_mode_local, set_workspace,
 };
 use crate::runners::{
     HostInstall, ImportReport, IntegrationOption, IntegrationSelection, ProvisionedPaths,
@@ -78,6 +79,93 @@ fn tools_adapter_dir(ruler_root: &Path) -> PathBuf {
     } else {
         legacy_root
     }
+}
+
+/// Keep OpenClaw default media roots aligned with Agent Ruler managed workspace.
+///
+/// OpenClaw native media send paths validate local attachments against
+/// `<OPENCLAW_HOME>/.openclaw/workspace` by default. Agent Ruler intentionally
+/// keeps managed workspace under runtime root, so we maintain a runtime-local
+/// workspace alias inside managed OpenClaw state.
+fn ensure_managed_workspace_media_alias(
+    managed_home: &Path,
+    managed_workspace: &Path,
+) -> Result<bool> {
+    fs::create_dir_all(managed_workspace)
+        .with_context(|| format!("create {}", managed_workspace.display()))?;
+
+    let state_root = managed_home.join(OPENCLAW_STATE_DIR_NAME);
+    fs::create_dir_all(&state_root).with_context(|| format!("create {}", state_root.display()))?;
+    let alias = state_root.join("workspace");
+    let target_canonical =
+        fs::canonicalize(managed_workspace).unwrap_or_else(|_| managed_workspace.to_path_buf());
+
+    match fs::symlink_metadata(&alias) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                let raw_target = fs::read_link(&alias)
+                    .with_context(|| format!("read link {}", alias.display()))?;
+                let resolved_target = if raw_target.is_absolute() {
+                    raw_target
+                } else {
+                    alias
+                        .parent()
+                        .map(|parent| parent.join(&raw_target))
+                        .unwrap_or(raw_target)
+                };
+                let resolved_canonical =
+                    fs::canonicalize(&resolved_target).unwrap_or(resolved_target);
+                if resolved_canonical == target_canonical {
+                    return Ok(false);
+                }
+                fs::remove_file(&alias)
+                    .with_context(|| format!("remove stale link {}", alias.display()))?;
+            } else if alias != managed_workspace {
+                let backup = state_root.join("workspace.legacy");
+                if backup.exists() {
+                    if backup.is_dir() {
+                        fs::remove_dir_all(&backup)
+                            .with_context(|| format!("remove {}", backup.display()))?;
+                    } else {
+                        fs::remove_file(&backup)
+                            .with_context(|| format!("remove {}", backup.display()))?;
+                    }
+                }
+                fs::rename(&alias, &backup).with_context(|| {
+                    format!(
+                        "relocate existing OpenClaw workspace alias {} -> {}",
+                        alias.display(),
+                        backup.display()
+                    )
+                })?;
+            } else {
+                return Ok(false);
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("read metadata {}", alias.display()));
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(managed_workspace, &alias).with_context(|| {
+        format!(
+            "symlink {} -> {}",
+            alias.display(),
+            managed_workspace.display()
+        )
+    })?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(managed_workspace, &alias).with_context(|| {
+        format!(
+            "symlink-dir {} -> {}",
+            alias.display(),
+            managed_workspace.display()
+        )
+    })?;
+
+    Ok(true)
 }
 
 /// Runner adapter implementation for OpenClaw.
@@ -378,6 +466,7 @@ impl RunnerAdapter for OpenClawAdapter {
             import_report.imported_config.as_ref(),
             &IMPORTABLE_ROOT_KEYS,
         );
+        normalize_telegram_streaming_flag(&mut openclaw_config);
         set_workspace(&mut openclaw_config, &paths.managed_workspace);
         set_gateway_mode_local(&mut openclaw_config);
         disable_session_memory_hook_for_non_anthropic(&mut openclaw_config);
@@ -395,6 +484,7 @@ impl RunnerAdapter for OpenClawAdapter {
         verify_import_requirements(paths, import_report)?;
 
         apply_integrations(runtime, paths, integrations)?;
+        ensure_managed_workspace_media_alias(&paths.managed_home, &paths.managed_workspace)?;
 
         let mut integration_ids: BTreeSet<String> =
             integrations.iter().map(|item| item.id.clone()).collect();
@@ -710,29 +800,40 @@ pub fn enforce_session_memory_hook_guard(managed_home: &Path) -> Result<bool> {
 /// plugin load/entry keys, which would otherwise bypass Agent Ruler preflight
 /// receipts for native tool calls.
 pub fn enforce_tools_adapter_config_guard(runtime: &RuntimeState) -> Result<bool> {
-    let managed_home = runtime
+    let (managed_home, managed_workspace) = runtime
         .config
         .runner
         .as_ref()
         .filter(|runner| runner.kind == RunnerKind::Openclaw)
-        .map(|runner| runner.managed_home.clone())
+        .map(|runner| {
+            (
+                runner.managed_home.clone(),
+                runner.managed_workspace.clone(),
+            )
+        })
         .unwrap_or_else(|| {
-            runtime
-                .config
-                .runtime_root
-                .join(RUNTIME_USER_DATA_DIR_NAME)
-                .join(OPENCLAW_HOME_DIR_NAME)
+            (
+                runtime
+                    .config
+                    .runtime_root
+                    .join(RUNTIME_USER_DATA_DIR_NAME)
+                    .join(OPENCLAW_HOME_DIR_NAME),
+                runtime.config.workspace.clone(),
+            )
         });
 
+    let alias_updated = ensure_managed_workspace_media_alias(&managed_home, &managed_workspace)?;
+
     let Some(config_path) = find_openclaw_config_path(&managed_home) else {
-        return Ok(false);
+        return Ok(alias_updated);
     };
 
     let mut config = read_config_map_or_default(&config_path)?;
     let before = config.clone();
+    normalize_telegram_streaming_flag(&mut config);
     apply_tools_adapter_config(runtime, &mut config, OPENCLAW_TOOLS_PLUGIN_ID);
     if config == before {
-        return Ok(false);
+        return Ok(alias_updated);
     }
 
     fs::write(
@@ -1295,7 +1396,8 @@ pub fn find_managed_gateway_listener_pid(managed_home: &Path) -> Result<Option<u
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut fallback: Option<u32> = None;
     for line in stdout.lines() {
-        if !line.contains("openclaw-gateway") {
+        let lower = line.to_ascii_lowercase();
+        if !lower.contains("openclaw") {
             continue;
         }
         let Some(pid) = parse_pid_from_ss_line(line) else {
@@ -1684,6 +1786,21 @@ mod tests {
             "boolean type should be preserved"
         );
         assert_eq!(
+            managed_json.pointer("/channels/telegram/streaming"),
+            Some(&Value::from(true)),
+            "managed config should enforce live Telegram streaming"
+        );
+        assert_eq!(
+            managed_json.pointer("/channels/telegram/blockStreaming"),
+            Some(&Value::from(false)),
+            "managed config should disable Telegram block streaming"
+        );
+        assert_eq!(
+            managed_json.pointer("/agents/defaults/blockStreamingDefault"),
+            Some(&Value::from("off")),
+            "managed config should force default block streaming off"
+        );
+        assert_eq!(
             managed_json.pointer("/bindings/primary/0"),
             Some(&Value::from("telegram")),
             "array/string type should be preserved"
@@ -2034,11 +2151,91 @@ mod tests {
                 .any(|entry| entry.as_str() == Some(expected_plugin_path.as_str())),
             "guard should add plugin load path"
         );
+        let workspace_alias = paths
+            .managed_home
+            .join(OPENCLAW_STATE_DIR_NAME)
+            .join("workspace");
+        let alias_canonical =
+            fs::canonicalize(&workspace_alias).expect("canonical workspace alias");
+        let workspace_canonical =
+            fs::canonicalize(&paths.managed_workspace).expect("canonical managed workspace");
+        assert_eq!(
+            alias_canonical, workspace_canonical,
+            "guard should align OpenClaw workspace media root alias with managed workspace"
+        );
 
         let second = enforce_tools_adapter_config_guard(&runtime).expect("reapply guard");
         assert!(
             !second,
             "guard should be idempotent when wiring already exists"
+        );
+    }
+
+    #[test]
+    fn tools_adapter_guard_enables_telegram_streaming_when_channel_is_enabled() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+
+        let adapter = OpenClawAdapter::new();
+        let paths = adapter
+            .provision_project_paths(&runtime)
+            .expect("provision paths");
+        seed_managed_config(&paths).expect("seed managed config");
+
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Openclaw,
+            managed_home: paths.managed_home.clone(),
+            managed_workspace: paths.managed_workspace.clone(),
+            integrations: vec![],
+            missing: RunnerMissingState::default(),
+        });
+
+        let cfg_path = preferred_openclaw_config_path(&paths.managed_home);
+        let seeded = serde_json::json!({
+            "agents": {
+                "defaults": {
+                    "workspace": paths.managed_workspace.to_string_lossy().to_string()
+                }
+            },
+            "gateway": {
+                "mode": "local"
+            },
+            "channels": {
+                "telegram": {
+                    "enabled": true,
+                    "streaming": false,
+                    "blockStreaming": true
+                }
+            }
+        });
+        fs::write(
+            &cfg_path,
+            serde_json::to_string_pretty(&seeded).expect("serialize seeded config"),
+        )
+        .expect("write seeded config");
+
+        let changed = enforce_tools_adapter_config_guard(&runtime).expect("apply guard");
+        assert!(changed, "guard should patch disabled Telegram streaming");
+
+        let managed_cfg = fs::read_to_string(&cfg_path).expect("read managed config");
+        let managed_json: Value = json5::from_str(&managed_cfg).expect("parse managed config");
+        assert_eq!(
+            managed_json.pointer("/channels/telegram/streaming"),
+            Some(&Value::from(true)),
+            "guard should force enabled Telegram streaming for managed runtime"
+        );
+        assert_eq!(
+            managed_json.pointer("/channels/telegram/blockStreaming"),
+            Some(&Value::from(false)),
+            "guard should disable Telegram block streaming for managed runtime"
+        );
+        assert_eq!(
+            managed_json.pointer("/agents/defaults/blockStreamingDefault"),
+            Some(&Value::from("off")),
+            "guard should set block streaming default off"
         );
     }
 

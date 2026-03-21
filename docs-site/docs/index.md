@@ -7,14 +7,13 @@ Welcome. This docs site is the practical handbook for running Agent Ruler withou
 - [About Agent Ruler](/guides/about-agent-ruler)
 - [Getting Started](/guides/getting-started)
 - [Control Panel Guide](/guides/control-panel)
-- [OpenClaw Guide](/integrations/openclaw-guide)
-- [OpenClaw API Reference](/integrations/openclaw-api-reference)
-- [Manual Tests](/guides/manual-tests)
+- [Integrations Guide](/integrations/guide)
+- [Integrations API Reference](/integrations/api-reference)
 
 ## Docs map
 
-- Getting Started (about, setup, Control Panel, manual tests)
-- Integrations (OpenClaw guide + API reference)
+- Getting Started (about, setup, Control Panel)
+- Integrations (shared guide + API reference with runner-specific sections)
 - Concepts (zone model and architecture)
 - Security
 - CLI Reference

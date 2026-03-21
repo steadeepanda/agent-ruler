@@ -10,7 +10,9 @@ use crate::model::{ActionKind, ActionRequest, Decision, ProcessContext, ReasonCo
 use crate::policy::PolicyEngine;
 use crate::receipts::ReceiptStore;
 
-use super::{append_receipt, quarantine_path};
+use super::{
+    append_receipt, insert_runner_id_metadata, quarantine_path, redacted_command_for_receipts,
+};
 
 pub(super) fn preflight_elevation_actions(
     cmd: &[String],
@@ -21,6 +23,7 @@ pub(super) fn preflight_elevation_actions(
     let Some(intent) = parse_sudo_intent(cmd) else {
         return Ok(());
     };
+    let receipt_command = redacted_command_for_receipts(cmd);
 
     let base_request = ActionRequest {
         id: uuid::Uuid::new_v4().to_string(),
@@ -32,13 +35,14 @@ pub(super) fn preflight_elevation_actions(
         host: None,
         metadata: {
             let mut metadata = BTreeMap::new();
-            metadata.insert("argv".to_string(), cmd.join(" "));
+            metadata.insert("argv".to_string(), receipt_command.clone());
+            insert_runner_id_metadata(&mut metadata, cmd);
             metadata
         },
         process: ProcessContext {
             pid: std::process::id(),
             ppid: None,
-            command: cmd.join(" "),
+            command: receipt_command,
             process_tree: vec![std::process::id()],
         },
     };
@@ -170,6 +174,7 @@ pub(super) fn preflight_utility_actions(
     if cmd.is_empty() {
         return Ok(());
     }
+    let receipt_command = redacted_command_for_receipts(cmd);
 
     let tool_name = Path::new(&cmd[0])
         .file_name()
@@ -188,11 +193,15 @@ pub(super) fn preflight_utility_actions(
                     path: Some(target.clone()),
                     secondary_path: None,
                     host: None,
-                    metadata: BTreeMap::new(),
+                    metadata: {
+                        let mut metadata = BTreeMap::new();
+                        insert_runner_id_metadata(&mut metadata, cmd);
+                        metadata
+                    },
                     process: ProcessContext {
                         pid: std::process::id(),
                         ppid: None,
-                        command: cmd.join(" "),
+                        command: receipt_command.clone(),
                         process_tree: vec![std::process::id()],
                     },
                 };
@@ -222,11 +231,15 @@ pub(super) fn preflight_utility_actions(
                     path: Some(dst),
                     secondary_path: Some(src),
                     host: None,
-                    metadata: BTreeMap::new(),
+                    metadata: {
+                        let mut metadata = BTreeMap::new();
+                        insert_runner_id_metadata(&mut metadata, cmd);
+                        metadata
+                    },
                     process: ProcessContext {
                         pid: std::process::id(),
                         ppid: None,
-                        command: cmd.join(" "),
+                        command: receipt_command.clone(),
                         process_tree: vec![std::process::id()],
                     },
                 };
@@ -256,11 +269,15 @@ pub(super) fn preflight_utility_actions(
                     path: Some(dst),
                     secondary_path: Some(src),
                     host: None,
-                    metadata: BTreeMap::new(),
+                    metadata: {
+                        let mut metadata = BTreeMap::new();
+                        insert_runner_id_metadata(&mut metadata, cmd);
+                        metadata
+                    },
                     process: ProcessContext {
                         pid: std::process::id(),
                         ppid: None,
-                        command: cmd.join(" "),
+                        command: receipt_command.clone(),
                         process_tree: vec![std::process::id()],
                     },
                 };
@@ -292,15 +309,17 @@ pub(super) fn preflight_network_egress_actions(
     if hosts.is_empty() {
         return Ok(());
     }
+    let receipt_command = redacted_command_for_receipts(cmd);
 
     let upload_pattern = looks_like_data_upload_command(cmd);
     let method = infer_http_method(cmd, upload_pattern);
 
     for host in hosts {
         let mut metadata = BTreeMap::new();
-        metadata.insert("argv".to_string(), cmd.join(" "));
+        metadata.insert("argv".to_string(), receipt_command.clone());
         metadata.insert("host".to_string(), host.clone());
         metadata.insert("method".to_string(), method.clone());
+        insert_runner_id_metadata(&mut metadata, cmd);
         if upload_pattern {
             metadata.insert("upload_pattern".to_string(), "true".to_string());
         }
@@ -321,7 +340,7 @@ pub(super) fn preflight_network_egress_actions(
             process: ProcessContext {
                 pid: std::process::id(),
                 ppid: None,
-                command: cmd.join(" "),
+                command: receipt_command.clone(),
                 process_tree: vec![std::process::id()],
             },
         };
@@ -359,10 +378,11 @@ pub(super) fn preflight_persistence_actions(
     if candidates.is_empty() {
         return Ok(());
     }
+    let receipt_command = redacted_command_for_receipts(cmd);
 
     for candidate in candidates {
         let mut metadata = BTreeMap::new();
-        metadata.insert("argv".to_string(), cmd.join(" "));
+        metadata.insert("argv".to_string(), receipt_command.clone());
         metadata.insert(
             "persistence_mechanism".to_string(),
             candidate.mechanism.clone(),
@@ -376,6 +396,7 @@ pub(super) fn preflight_persistence_actions(
             "requires_elevation".to_string(),
             candidate.requires_elevation.to_string(),
         );
+        insert_runner_id_metadata(&mut metadata, cmd);
         metadata.insert(
             "command_summary".to_string(),
             summarize_persistence_command(cmd, &candidate),
@@ -399,7 +420,7 @@ pub(super) fn preflight_persistence_actions(
             process: ProcessContext {
                 pid: std::process::id(),
                 ppid: None,
-                command: cmd.join(" "),
+                command: receipt_command.clone(),
                 process_tree: vec![std::process::id()],
             },
         };
@@ -428,6 +449,7 @@ pub(super) fn preflight_interpreter_exec_actions(
     if cmd.is_empty() {
         return Ok(());
     }
+    let receipt_command = redacted_command_for_receipts(cmd);
 
     let tool_name = Path::new(&cmd[0])
         .file_name()
@@ -441,9 +463,10 @@ pub(super) fn preflight_interpreter_exec_actions(
     for candidate in interpreter_script_candidates(cmd) {
         let target = normalize_runtime_path(runtime, &candidate);
         let mut metadata = BTreeMap::new();
-        metadata.insert("argv".to_string(), cmd.join(" "));
+        metadata.insert("argv".to_string(), receipt_command.clone());
         metadata.insert("interpreter".to_string(), "true".to_string());
         metadata.insert("interpreter_name".to_string(), tool_name.clone());
+        insert_runner_id_metadata(&mut metadata, cmd);
         metadata.insert(
             "script_path".to_string(),
             target.to_string_lossy().to_string(),
@@ -461,7 +484,7 @@ pub(super) fn preflight_interpreter_exec_actions(
             process: ProcessContext {
                 pid: std::process::id(),
                 ppid: None,
-                command: cmd.join(" "),
+                command: receipt_command.clone(),
                 process_tree: vec![std::process::id()],
             },
         };
@@ -482,9 +505,10 @@ pub(super) fn preflight_interpreter_exec_actions(
             crate::utils::resolve_command_path(&cmd[0]).unwrap_or_else(|| PathBuf::from(&cmd[0]));
         for host in extract_hosts_from_command(cmd) {
             let mut metadata = BTreeMap::new();
-            metadata.insert("argv".to_string(), cmd.join(" "));
+            metadata.insert("argv".to_string(), receipt_command.clone());
             metadata.insert("stream_exec".to_string(), "true".to_string());
             metadata.insert("download_source".to_string(), host.clone());
+            insert_runner_id_metadata(&mut metadata, cmd);
 
             let action = ActionRequest {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -498,7 +522,7 @@ pub(super) fn preflight_interpreter_exec_actions(
                 process: ProcessContext {
                     pid: std::process::id(),
                     ppid: None,
-                    command: cmd.join(" "),
+                    command: receipt_command.clone(),
                     process_tree: vec![std::process::id()],
                 },
             };
@@ -788,13 +812,28 @@ fn is_suspicious_persistence_chain(command_lower: &str, scope: &str) -> bool {
 
 fn extract_hosts_from_command(cmd: &[String]) -> Vec<String> {
     let mut uniq = std::collections::BTreeSet::new();
-    let joined = cmd.join(" ");
+    let joined = cmd
+        .iter()
+        .filter(|token| !is_agent_ruler_internal_env_assignment(token))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
 
     for host in extract_url_hosts(&joined) {
         uniq.insert(host);
     }
 
     uniq.into_iter().collect()
+}
+
+fn is_agent_ruler_internal_env_assignment(token: &str) -> bool {
+    let Some((key, _value)) = token.split_once('=') else {
+        return false;
+    };
+    if key.is_empty() {
+        return false;
+    }
+    key.starts_with("AGENT_RULER_")
 }
 
 fn extract_url_hosts(text: &str) -> Vec<String> {
@@ -1221,4 +1260,38 @@ pub(super) fn finalize_with_approval(
     }
 
     Ok(decision)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_hosts_from_command;
+
+    #[test]
+    fn extract_hosts_ignores_agent_ruler_internal_base_url_assignment() {
+        let cmd = vec![
+            "env".to_string(),
+            "AGENT_RULER_BASE_URL=http://127.0.0.1:4622".to_string(),
+            "opencode".to_string(),
+            "run".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert!(
+            extract_hosts_from_command(&cmd).is_empty(),
+            "internal Agent Ruler base url env assignment must not be treated as outbound egress"
+        );
+    }
+
+    #[test]
+    fn extract_hosts_still_detects_external_targets_with_internal_env_assignment() {
+        let cmd = vec![
+            "env".to_string(),
+            "AGENT_RULER_BASE_URL=http://127.0.0.1:4622".to_string(),
+            "curl".to_string(),
+            "https://api.example.com/v1/ping".to_string(),
+        ];
+        assert_eq!(
+            extract_hosts_from_command(&cmd),
+            vec!["api.example.com".to_string()]
+        );
+    }
 }

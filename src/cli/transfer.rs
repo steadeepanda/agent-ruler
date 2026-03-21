@@ -583,6 +583,21 @@ fn normalize_stage_path(runtime: &RuntimeState, input: &Path) -> Result<PathBuf>
     }
 }
 
+fn normalize_stage_reference_path(runtime: &RuntimeState, input: &Path) -> Result<PathBuf> {
+    if input.is_absolute() {
+        if has_parent_component(input) || !input.starts_with(&runtime.config.shared_zone_dir) {
+            return Err(anyhow!(
+                "stage reference must stay within shared zone: {}",
+                runtime.config.shared_zone_dir.display()
+            ));
+        }
+        Ok(input.to_path_buf())
+    } else {
+        ensure_relative_subpath(input, "stage reference")?;
+        Ok(runtime.config.shared_zone_dir.join(input))
+    }
+}
+
 fn normalize_delivery_path(runtime: &RuntimeState, input: &Path) -> PathBuf {
     if input.is_absolute() {
         input.to_path_buf()
@@ -642,18 +657,11 @@ fn resolve_staged_reference(
     let staged_input = staged.to_string_lossy().to_string();
 
     if let Some(record) = staged_store.get(&staged_input)? {
-        return Ok((Some(record.id), PathBuf::from(record.staged_path)));
+        let staged_path = normalize_stage_reference_path(runtime, Path::new(&record.staged_path))?;
+        return Ok((Some(record.id), staged_path));
     }
 
-    if !staged.is_absolute() {
-        ensure_relative_subpath(staged, "stage reference")?;
-    }
-
-    let staged_path = if staged.is_absolute() {
-        staged.to_path_buf()
-    } else {
-        runtime.config.shared_zone_dir.join(staged)
-    };
+    let staged_path = normalize_stage_reference_path(runtime, staged)?;
 
     if let Some(record) = staged_store.find_by_staged_path(&staged_path)? {
         return Ok((Some(record.id), staged_path));

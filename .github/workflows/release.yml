@@ -30,8 +30,26 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Verify docs dist is not committed
+        run: |
+          if git ls-files --error-unmatch docs-site/docs/.vitepress/dist >/dev/null 2>&1; then
+            echo "docs-site/docs/.vitepress/dist is tracked; generated docs must not be committed." >&2
+            exit 1
+          fi
+
+      - name: Build docs bundle for tests
+        run: |
+          npm --prefix docs-site ci
+          npm --prefix docs-site run docs:build
 
       - name: Format check
         run: cargo fmt -- --check

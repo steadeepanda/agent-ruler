@@ -58,8 +58,7 @@ NODE
 perl -0pi -e 's/(^version:\s*)[0-9]+\.[0-9]+\.[0-9]+/${1}'"$VERSION"'/m' "$ROOT_DIR/bridge/openclaw/approvals-hook/HOOK.md"
 for file in \
   "$ROOT_DIR/SECURITY.md" \
-  "$ROOT_DIR/docs/architecture.md" \
-  "$ROOT_DIR/docs/security/prompt-injection.md" \
+  "$ROOT_DIR/docs-site/docs/concepts/bridge-architecture.md" \
   "$ROOT_DIR/docs-site/docs/concepts/architecture.md" \
   "$ROOT_DIR/docs-site/docs/security/prompt-injection.md" \
   "$ROOT_DIR/docs-site/docs/security/security-policy.md"; do

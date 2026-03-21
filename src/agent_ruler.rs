@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -14,6 +14,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use ::agent_ruler::approvals::ApprovalStore;
+use ::agent_ruler::claudecode_bridge::{
+    ensure_generated_config as ensure_generated_claudecode_bridge_config,
+    generated_config_path as generated_claudecode_bridge_config_path,
+};
 use ::agent_ruler::config::{
     detect_ruler_root, init_layout, load_runtime, reset_layout, save_config, RuntimeState,
     CONFIG_FILE_NAME,
@@ -22,19 +26,37 @@ use ::agent_ruler::embedded_bridge::ensure_embedded_bridge_assets;
 use ::agent_ruler::helpers::approvals::append_approval_resolution_receipt;
 use ::agent_ruler::helpers::commands::ui::{stop_ui_processes_in_projects_root, UiPidGuard};
 use ::agent_ruler::helpers::maybe_apply_approval_effect;
+use ::agent_ruler::helpers::runners::command_contract::{
+    detect_structured_output_kind, normalize_runner_command, summarize_structured_output,
+    StructuredOutputSummary,
+};
+use ::agent_ruler::helpers::ui::runtime_api::sync_selected_runner_telegram_bridges;
+use ::agent_ruler::model::{
+    ActionKind, ActionRequest, Decision, ProcessContext, ReasonCode, Verdict,
+};
 use ::agent_ruler::openclaw_bridge::{ensure_generated_config, generated_config_path};
+use ::agent_ruler::opencode_bridge::{
+    ensure_generated_config as ensure_generated_opencode_bridge_config,
+    generated_config_path as generated_opencode_bridge_config_path,
+};
 use ::agent_ruler::policy::PolicyEngine;
 use ::agent_ruler::receipts::ReceiptStore;
-use ::agent_ruler::runner::run_confined;
+use ::agent_ruler::runner::{append_receipt, redacted_command_for_receipts, run_confined};
+use ::agent_ruler::runners::claudecode::{
+    enforce_managed_settings_guard, ensure_managed_settings_seed, managed_auth_logged_in,
+};
 use ::agent_ruler::runners::openclaw::{
     enforce_session_memory_hook_guard, enforce_tools_adapter_config_guard,
     find_managed_gateway_listener_pid, inspect_managed_telegram_config,
     maybe_collect_gateway_port_diagnostics,
 };
+use ::agent_ruler::runners::opencode::{
+    enforce_managed_governance_config_guard, ensure_managed_auth_seed,
+};
 use ::agent_ruler::runners::{
-    apply_runner_env_overrides, configured_runner_targets_command,
-    reconcile_runner_executable_with_options, RunnerAvailabilityState, RunnerCheckOptions,
-    RunnerKind,
+    apply_runner_env_overrides, command_runner_kind, configured_runner_targets_command,
+    reconcile_runner_executable_with_options, workspace_root_for_command, RunnerAvailabilityState,
+    RunnerCheckOptions, RunnerKind,
 };
 use ::agent_ruler::staged_exports::{StagedExportState, StagedExportStore};
 use ::agent_ruler::ui;
@@ -106,6 +128,10 @@ enum Commands {
         bind: Option<String>,
         #[command(subcommand)]
         action: Option<UiAction>,
+    },
+    Stop {
+        #[command(subcommand)]
+        action: StopAction,
     },
     Export {
         src: PathBuf,
@@ -191,6 +217,15 @@ enum UiAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum StopAction {
+    Ui,
+    Run {
+        #[arg(required = true, trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum RunnerCommands {
     Remove {
         runner: RunnerArg,
@@ -209,12 +244,16 @@ enum ApprovalDecisionArg {
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum RunnerArg {
     Openclaw,
+    Claudecode,
+    Opencode,
 }
 
 impl From<RunnerArg> for RunnerKind {
     fn from(value: RunnerArg) -> Self {
         match value {
             RunnerArg::Openclaw => RunnerKind::Openclaw,
+            RunnerArg::Claudecode => RunnerKind::Claudecode,
+            RunnerArg::Opencode => RunnerKind::Opencode,
         }
     }
 }
@@ -254,12 +293,50 @@ pub async fn run() -> Result<()> {
             if is_openclaw_gateway_stop(&cmd) {
                 let gateway_stopped = stop_managed_background_gateway(&runtime)?;
                 let bridge_stopped = stop_managed_openclaw_bridge(&runtime)?;
-                if !(gateway_stopped && bridge_stopped) {
+                let runner_bridges_stopped = stop_managed_runner_bridges(&runtime)?;
+                if !(gateway_stopped && bridge_stopped && runner_bridges_stopped) {
                     return Err(anyhow!(
                         "gateway stop failed: one or more managed processes are still running (see log for details)"
                     ));
                 }
                 return Ok(());
+            }
+
+            if let Some(web_kind) = runner_web_stop_kind(&cmd) {
+                let web_stopped = stop_managed_runner_web(&runtime, web_kind)?;
+                if !web_stopped {
+                    return Err(anyhow!(
+                        "{} web stop failed: managed process is still running (see log for details)",
+                        web_kind.id()
+                    ));
+                }
+                return Ok(());
+            }
+
+            if let Some(target_kind) = command_runner_kind(&cmd) {
+                let configured_kind = runtime.config.runner.as_ref().map(|runner| runner.kind);
+                match configured_kind {
+                    Some(kind) if kind != target_kind => {
+                        return Err(anyhow!(
+                            "runner mismatch: runtime is configured for {}, but command targets {}. Run `agent-ruler setup` to switch runner mapping.",
+                            kind.display_name(),
+                            target_kind.display_name()
+                        ));
+                    }
+                    None => {
+                        return Err(anyhow!(
+                            "runner command `{}` requires setup before use in this project runtime. Run `agent-ruler setup` first.",
+                            target_kind.executable_name()
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+            if claudecode_legacy_web_alias_requested(&cmd) {
+                return Err(anyhow!(
+                    "`claude web` is not the native Claude Code web launcher in this CLI build. Use `agent-ruler run -- claude remote-control` (and `agent-ruler run -- claude remote-control stop`)."
+                ));
             }
 
             let targets_runner = configured_runner_targets_command(&runtime, &cmd);
@@ -276,17 +353,109 @@ pub async fn run() -> Result<()> {
                         | RunnerAvailabilityState::MissingReconfigure
                 )
             {
+                let configured_kind = runtime
+                    .config
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.kind)
+                    .unwrap_or(RunnerKind::Openclaw);
                 return Err(anyhow!(
-                    "runner `{}` is not available; install it or run `agent-ruler setup` / `agent-ruler runner remove openclaw`",
-                    RunnerKind::Openclaw.executable_name()
+                    "runner `{}` is not available; install it or run `agent-ruler setup` / `agent-ruler runner remove {}`",
+                    configured_kind.executable_name(),
+                    configured_kind.id(),
                 ));
             }
 
-            if is_openclaw_gateway_launch(&cmd) {
+            if targets_runner && !runner_command_is_control_only(&cmd) {
                 maybe_auto_configure_ui_bind_for_tailscale(&mut runtime);
             }
 
+            if targets_runner {
+                ensure_ui_ready_for_runner_command(&runtime, &cmd)?;
+            }
+
+            if claudecode_command_requires_managed_auth(&cmd) {
+                match ensure_managed_settings_seed(&runtime) {
+                    Ok(true) => {
+                        eprintln!(
+                            "runner auth sync: seeded Claude Code managed settings from host profile."
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "runner auth sync: unable to seed Claude Code managed settings: {err}"
+                        );
+                    }
+                }
+            }
+
+            if is_claudecode_command(&cmd) {
+                match enforce_managed_settings_guard(&runtime) {
+                    Ok(true) => {
+                        eprintln!("runner config guard: restored managed Claude settings profile.");
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "runner config guard: unable to enforce managed Claude settings: {err}"
+                        );
+                    }
+                }
+            }
+
+            if claudecode_command_requires_managed_auth(&cmd) {
+                match managed_auth_logged_in(&runtime)? {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(anyhow!(
+                            "Claude Code managed runtime has no usable auth/config. Agent Ruler supports either managed `settings.json` auth (for example API-token/base-URL settings copied from your host Claude profile) or managed OAuth login. Re-run `agent-ruler setup` to refresh managed Claude settings, or run `agent-ruler run -- claude auth login` if you want OAuth login in this project runtime."
+                        ));
+                    }
+                    None => {
+                        eprintln!(
+                            "runner auth diagnostics: unable to verify managed Claude Code auth status; continuing run."
+                        );
+                    }
+                }
+            }
+
+            if is_opencode_command(&cmd) {
+                match ensure_managed_auth_seed(&runtime) {
+                    Ok(true) => {
+                        eprintln!(
+                            "runner auth sync: seeded OpenCode managed auth from host profile."
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        eprintln!("runner auth sync: unable to seed OpenCode managed auth: {err}");
+                    }
+                }
+
+                match enforce_managed_governance_config_guard(&runtime) {
+                    Ok(true) => {
+                        eprintln!(
+                            "runner config guard: restored Agent Ruler governance wiring in managed OpenCode config."
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "runner config guard: unable to enforce OpenCode governance wiring: {err}"
+                        );
+                    }
+                }
+            }
+
             if is_openclaw_command(&cmd) {
+                // OpenClaw owns native Telegram onboarding/commands, so
+                // runner-bridge polling must stay disabled while OpenClaw runs.
+                if let Err(err) = sync_selected_runner_telegram_bridges(&runtime, false, false) {
+                    eprintln!(
+                        "runner bridge diagnostics: unable to enforce OpenClaw-native Telegram ownership: {err}"
+                    );
+                }
                 match enforce_tools_adapter_config_guard(&runtime) {
                     Ok(true) => {
                         eprintln!(
@@ -303,6 +472,8 @@ pub async fn run() -> Result<()> {
 
                 ensure_openclaw_preflight_api_ready(&runtime, &cmd)?;
             }
+
+            ensure_runner_tool_preflight_api_ready(&runtime, &cmd)?;
 
             if is_openclaw_gateway_launch(&cmd) {
                 let managed_home = managed_openclaw_home(&runtime);
@@ -331,26 +502,87 @@ pub async fn run() -> Result<()> {
                 }
             }
 
+            if is_claudecode_command(&cmd) {
+                if let Err(err) =
+                    maybe_start_managed_runner_bridge(&runtime, RunnerBridgeKind::Claudecode)
+                {
+                    eprintln!(
+                        "claudecode bridge diagnostics: unable to ensure managed bridge: {err}"
+                    );
+                }
+            }
+            if is_opencode_command(&cmd) {
+                if let Err(err) =
+                    maybe_start_managed_runner_bridge(&runtime, RunnerBridgeKind::Opencode)
+                {
+                    eprintln!(
+                        "opencode bridge diagnostics: unable to ensure managed bridge: {err}"
+                    );
+                }
+            }
+
+            if is_runner_web_launch(&cmd) {
+                ensure_ui_ready_for_runner_web(&runtime, &cmd)?;
+            }
+
             let normalized_cmd = normalize_openclaw_gateway_launch_command(&cmd);
+            let governed_runner_cmd =
+                inject_claudecode_governance_plugin_dir(&runtime, &normalized_cmd);
+            let normalized_runner_cmd = normalize_runner_command(&governed_runner_cmd);
 
             // `openclaw gateway` defaults to detached mode unless caller
             // explicitly forces foreground. This preserves prior UX where
             // gateway command returns while service keeps running.
             if is_openclaw_gateway_launch(&cmd) && !foreground {
-                return spawn_background_run(&runtime, &normalized_cmd);
+                return spawn_background_run(&runtime, &normalized_runner_cmd);
             }
 
-            let engine =
-                PolicyEngine::new(runtime.policy.clone(), runtime.config.workspace.clone());
+            // Mirror detached gateway UX for runner web interfaces so operator
+            // can start/stop browser-facing sessions with stable commands.
+            if runner_web_kind_for_launch_command(&cmd).is_some() && !foreground {
+                return spawn_background_run(&runtime, &normalized_runner_cmd);
+            }
+
+            let runner_workspace = workspace_root_for_command(&runtime, &normalized_runner_cmd);
+            let engine = PolicyEngine::new(runtime.policy.clone(), runner_workspace);
             let approvals = ApprovalStore::new(&runtime.config.approvals_file);
             let receipts = ReceiptStore::new(&runtime.config.receipts_file);
 
             if background {
-                return spawn_background_run(&runtime, &normalized_cmd);
+                return spawn_background_run(&runtime, &normalized_runner_cmd);
             }
 
-            let effective_cmd = apply_runner_env_overrides(&runtime, &normalized_cmd);
+            let effective_cmd = apply_runner_env_overrides(&runtime, &normalized_runner_cmd);
+            let structured_kind = detect_structured_output_kind(&effective_cmd);
             let run = run_confined(&effective_cmd, &runtime, &engine, &approvals, &receipts)?;
+            let auth_hint = runner_auth_prerequisite_hint(&effective_cmd, &run.stdout, &run.stderr);
+            let mut auth_hint_emitted = false;
+            if let Some(kind) = structured_kind {
+                let summary = summarize_structured_output(kind, &run.stdout, &run.stderr);
+                append_runner_structured_output_receipt(
+                    &runtime,
+                    &receipts,
+                    &effective_cmd,
+                    &run.confinement,
+                    &summary,
+                )?;
+                if let Some(parse_error) = summary.parse_error.as_deref() {
+                    if let Some(auth_hint) = auth_hint.as_deref() {
+                        eprintln!("{auth_hint}");
+                        auth_hint_emitted = true;
+                    } else {
+                        eprintln!(
+                            "runner output parse warning ({}): {}",
+                            summary.parser, parse_error
+                        );
+                    }
+                }
+            }
+            if run.exit_code != 0 && !auth_hint_emitted {
+                if let Some(auth_hint) = auth_hint.as_deref() {
+                    eprintln!("{auth_hint}");
+                }
+            }
             if run.exit_code != 0 {
                 print_openclaw_gateway_port_diagnostics(&runtime, &cmd, &run.stdout, &run.stderr);
                 print_openclaw_gateway_telegram_diagnostics(
@@ -601,6 +833,14 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
+        Commands::Stop { action } => {
+            let runtime = load_runtime(&ruler_root, runtime_dir.as_deref())
+                .context("load runtime (run `agent-ruler init` first)")?;
+            match action {
+                StopAction::Ui => stop_ui_action(&runtime),
+                StopAction::Run { cmd } => stop_runner_action(&runtime, &cmd),
+            }
+        }
         Commands::Export {
             src,
             dst,
@@ -732,12 +972,23 @@ const GATEWAY_LOG_FILE_NAME: &str = "openclaw-gateway.log";
 const OPENCLAW_CHANNEL_BRIDGE_PID_FILE_NAME: &str = "openclaw-channel-bridge.pid";
 const OPENCLAW_CHANNEL_BRIDGE_LOG_FILE_NAME: &str = "openclaw-channel-bridge.log";
 const OPENCLAW_BRIDGE_RUNNER_DIR_NAME: &str = "openclaw";
+const CLAUDECODE_BRIDGE_RUNNER_DIR_NAME: &str = "claudecode";
+const OPENCODE_BRIDGE_RUNNER_DIR_NAME: &str = "opencode";
+const RUNNER_CHANNELS_DIR_NAME: &str = "channels";
+const TELEGRAM_CHANNELS_SUBDIR_NAME: &str = "telegram";
+const CLAUDECODE_TELEGRAM_CHANNEL_BRIDGE_PID_FILE_NAME: &str =
+    "claudecode-telegram-channel-bridge.pid";
+const OPENCODE_TELEGRAM_CHANNEL_BRIDGE_PID_FILE_NAME: &str = "opencode-telegram-channel-bridge.pid";
+const CLAUDECODE_TELEGRAM_CHANNEL_BRIDGE_LOG_FILE_NAME: &str =
+    "claudecode-telegram-channel-bridge.log";
+const OPENCODE_TELEGRAM_CHANNEL_BRIDGE_LOG_FILE_NAME: &str = "opencode-telegram-channel-bridge.log";
 const OPENCLAW_CHANNEL_BRIDGE_CONFIG_FILE_NAME: &str = "channel-bridge.json";
 const OPENCLAW_CHANNEL_BRIDGE_LEGACY_CONFIG_FILE_NAME: &str = "openclaw-channel-bridge.json";
 const OPENCLAW_CHANNEL_BRIDGE_LOCAL_CONFIG_FILE_NAME: &str = "channel-bridge.local.json";
 const OPENCLAW_CHANNEL_BRIDGE_LEGACY_LOCAL_CONFIG_FILE_NAME: &str =
     "openclaw-channel-bridge.local.json";
 const OPENCLAW_CHANNEL_BRIDGE_SCRIPT_FILE_NAME: &str = "channel_bridge.py";
+const RUNNER_TELEGRAM_CHANNEL_BRIDGE_SCRIPT_FILE_NAME: &str = "channel_bridge.py";
 const OPENCLAW_CHANNEL_BRIDGE_LEGACY_SCRIPT_FILE_NAME: &str = "openclaw_channel_bridge.py";
 const OPENCLAW_BRIDGE_ROUTES_POINTER: &str =
     "plugins.entries.openclaw-agent-ruler-tools.config.approvalBridgeRoutes";
@@ -748,6 +999,15 @@ const OPENCLAW_APPROVALS_HOOK_BRIDGE_URL_POINTER: &str =
     "hooks.internal.entries.agent-ruler-approvals.env.AR_OPENCLAW_BRIDGE_URL";
 const OPENCLAW_PREFLIGHT_UI_LOG_FILE_NAME: &str = "agent-ruler-ui.log";
 const OPENCLAW_TOOL_PREFLIGHT_PATH: &str = "/api/openclaw/tool/preflight";
+const CLAUDECODE_TOOL_PREFLIGHT_PATH: &str = "/api/claudecode/tool/preflight";
+const OPENCODE_TOOL_PREFLIGHT_PATH: &str = "/api/opencode/tool/preflight";
+const CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE: &str =
+    "bridge/claudecode/claudecode-agent-ruler-tools";
+const CLAUDECODE_WEB_PID_RECORD_FILE_NAME: &str = "claudecode-web.pid.json";
+const OPENCODE_WEB_PID_RECORD_FILE_NAME: &str = "opencode-web.pid.json";
+const CLAUDECODE_WEB_LOG_FILE_NAME: &str = "claudecode-web.log";
+const OPENCODE_WEB_LOG_FILE_NAME: &str = "opencode-web.log";
+const RUNNER_WEB_UI_STARTUP_TIMEOUT_SECS: u64 = 8;
 
 fn stop_host_gateway() -> Result<()> {
     let _ = Command::new("openclaw").args(["gateway", "stop"]).status();
@@ -767,6 +1027,85 @@ fn openclaw_bridge_dir(runtime: &::agent_ruler::config::RuntimeState) -> PathBuf
     bridge_root_dir(runtime).join(OPENCLAW_BRIDGE_RUNNER_DIR_NAME)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunnerBridgeKind {
+    Claudecode,
+    Opencode,
+}
+
+impl RunnerBridgeKind {
+    fn id(self) -> &'static str {
+        match self {
+            RunnerBridgeKind::Claudecode => "claudecode",
+            RunnerBridgeKind::Opencode => "opencode",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            RunnerBridgeKind::Claudecode => "Claude Code",
+            RunnerBridgeKind::Opencode => "OpenCode",
+        }
+    }
+
+    fn bridge_runner_dir_name(self) -> &'static str {
+        match self {
+            RunnerBridgeKind::Claudecode => CLAUDECODE_BRIDGE_RUNNER_DIR_NAME,
+            RunnerBridgeKind::Opencode => OPENCODE_BRIDGE_RUNNER_DIR_NAME,
+        }
+    }
+
+    fn pid_file_name(self) -> &'static str {
+        match self {
+            RunnerBridgeKind::Claudecode => CLAUDECODE_TELEGRAM_CHANNEL_BRIDGE_PID_FILE_NAME,
+            RunnerBridgeKind::Opencode => OPENCODE_TELEGRAM_CHANNEL_BRIDGE_PID_FILE_NAME,
+        }
+    }
+
+    fn log_file_name(self) -> &'static str {
+        match self {
+            RunnerBridgeKind::Claudecode => CLAUDECODE_TELEGRAM_CHANNEL_BRIDGE_LOG_FILE_NAME,
+            RunnerBridgeKind::Opencode => OPENCODE_TELEGRAM_CHANNEL_BRIDGE_LOG_FILE_NAME,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunnerWebKind {
+    Claudecode,
+    Opencode,
+}
+
+impl RunnerWebKind {
+    fn id(self) -> &'static str {
+        match self {
+            RunnerWebKind::Claudecode => "claudecode",
+            RunnerWebKind::Opencode => "opencode",
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            RunnerWebKind::Claudecode => "Claude Code",
+            RunnerWebKind::Opencode => "OpenCode",
+        }
+    }
+
+    fn pid_record_file_name(self) -> &'static str {
+        match self {
+            RunnerWebKind::Claudecode => CLAUDECODE_WEB_PID_RECORD_FILE_NAME,
+            RunnerWebKind::Opencode => OPENCODE_WEB_PID_RECORD_FILE_NAME,
+        }
+    }
+
+    fn log_file_name(self) -> &'static str {
+        match self {
+            RunnerWebKind::Claudecode => CLAUDECODE_WEB_LOG_FILE_NAME,
+            RunnerWebKind::Opencode => OPENCODE_WEB_LOG_FILE_NAME,
+        }
+    }
+}
+
 fn openclaw_bridge_script_path(runtime: &::agent_ruler::config::RuntimeState) -> PathBuf {
     let preferred = openclaw_bridge_dir(runtime).join(OPENCLAW_CHANNEL_BRIDGE_SCRIPT_FILE_NAME);
     if preferred.exists() {
@@ -777,6 +1116,17 @@ fn openclaw_bridge_script_path(runtime: &::agent_ruler::config::RuntimeState) ->
         return legacy;
     }
     preferred
+}
+
+fn runner_bridge_script_path(
+    runtime: &::agent_ruler::config::RuntimeState,
+    runner: RunnerBridgeKind,
+) -> PathBuf {
+    bridge_root_dir(runtime)
+        .join(runner.bridge_runner_dir_name())
+        .join(RUNNER_CHANNELS_DIR_NAME)
+        .join(TELEGRAM_CHANNELS_SUBDIR_NAME)
+        .join(RUNNER_TELEGRAM_CHANNEL_BRIDGE_SCRIPT_FILE_NAME)
 }
 
 fn openclaw_approvals_hook_source_dir(runtime: &::agent_ruler::config::RuntimeState) -> PathBuf {
@@ -938,6 +1288,30 @@ fn openclaw_bridge_log_file(runtime: &::agent_ruler::config::RuntimeState) -> Pa
         .join("user_data")
         .join("logs")
         .join(OPENCLAW_CHANNEL_BRIDGE_LOG_FILE_NAME)
+}
+
+fn runner_bridge_pid_file(
+    runtime: &::agent_ruler::config::RuntimeState,
+    runner: RunnerBridgeKind,
+) -> PathBuf {
+    runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("logs")
+        .join(runner.pid_file_name())
+}
+
+fn runner_bridge_log_file(
+    runtime: &::agent_ruler::config::RuntimeState,
+    runner: RunnerBridgeKind,
+) -> PathBuf {
+    runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("logs")
+        .join(runner.log_file_name())
 }
 
 fn bridge_config_routes(config_path: &Path) -> Result<Option<Vec<serde_json::Value>>> {
@@ -1289,6 +1663,110 @@ fn maybe_start_managed_openclaw_bridge(
     }
 }
 
+fn maybe_start_managed_runner_bridge(
+    runtime: &::agent_ruler::config::RuntimeState,
+    runner: RunnerBridgeKind,
+) -> Result<()> {
+    // Keep runner bridge config isolated so Claude Code and OpenCode can drift
+    // independently without sharing mutable state files.
+    let (bridge_config, config_path) = match runner {
+        RunnerBridgeKind::Claudecode => (
+            ensure_generated_claudecode_bridge_config(runtime)
+                .context("generate claudecode bridge runtime config before startup")?,
+            generated_claudecode_bridge_config_path(runtime),
+        ),
+        RunnerBridgeKind::Opencode => (
+            ensure_generated_opencode_bridge_config(runtime)
+                .context("generate opencode bridge runtime config before startup")?,
+            generated_opencode_bridge_config_path(runtime),
+        ),
+    };
+    let runner_label = runner.display_name();
+    let runner_id = runner.id();
+    if !bridge_config.token_configured() {
+        return Ok(());
+    }
+    if !bridge_config.enabled {
+        return Ok(());
+    }
+
+    let script_path = runner_bridge_script_path(runtime, runner);
+    if !script_path.exists() {
+        return Err(anyhow!(
+            "managed {runner_id} bridge startup blocked: missing bridge script {}",
+            script_path.display()
+        ));
+    }
+
+    let pid_file = runner_bridge_pid_file(runtime, runner);
+    if let Ok(raw) = fs::read_to_string(&pid_file) {
+        if let Ok(pid) = raw.trim().parse::<u32>() {
+            if process_exists(pid) {
+                eprintln!(
+                    "{runner_id} bridge diagnostics: managed {runner_label} bridge already running (pid: {}).",
+                    pid
+                );
+                return Ok(());
+            }
+        }
+    }
+    let _ = remove_if_exists(&pid_file);
+
+    let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| {
+        format!(
+            "create {runner_id} bridge logs directory {}",
+            logs_dir.display()
+        )
+    })?;
+    let log_path = runner_bridge_log_file(runtime, runner);
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {runner_id} bridge log {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("clone {runner_id} bridge log handle {}", log_path.display()))?;
+
+    let mut child = Command::new("python3")
+        .arg(&script_path)
+        .arg("--config")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .with_context(|| format!("spawn managed {runner_id} bridge process"))?;
+
+    if let Err(err) = fs::write(&pid_file, format!("{}\n", child.id())) {
+        eprintln!(
+            "{runner_id} bridge diagnostics: unable to persist bridge pid file {}: {err}",
+            pid_file.display()
+        );
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+    if let Some(status) = child
+        .try_wait()
+        .context("check managed Telegram bridge startup status")?
+    {
+        let _ = remove_if_exists(&pid_file);
+        return Err(anyhow!(
+            "managed {runner_label} bridge exited during startup (status {}); check {}",
+            status,
+            log_path.display()
+        ));
+    }
+
+    eprintln!(
+        "{runner_id} bridge diagnostics: managed {runner_label} bridge started (pid: {}, log: {}).",
+        child.id(),
+        log_path.display()
+    );
+    Ok(())
+}
+
 /// Start the UI while writing the pid file so the new stop command can locate it.
 async fn run_ui_server(runtime: RuntimeState, bind: String) -> Result<()> {
     let _pid_guard = UiPidGuard::create(&runtime)?;
@@ -1311,6 +1789,64 @@ fn stop_ui_action(runtime: &RuntimeState) -> Result<()> {
     }
 }
 
+fn stop_runner_action(runtime: &::agent_ruler::config::RuntimeState, cmd: &[String]) -> Result<()> {
+    let target = parse_stop_runner_target(cmd)?;
+    match target {
+        RunnerKind::Openclaw => {
+            let gateway_stopped = stop_managed_background_gateway(runtime)?;
+            let bridge_stopped = stop_managed_openclaw_bridge(runtime)?;
+            if gateway_stopped && bridge_stopped {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "stop run openclaw failed: one or more managed OpenClaw processes are still running"
+                ))
+            }
+        }
+        RunnerKind::Claudecode => {
+            let stopped = stop_managed_runner_bridge(runtime, RunnerBridgeKind::Claudecode)?;
+            if stopped {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "stop run claudecode failed: managed Claude Code Telegram bridge is still running"
+                ))
+            }
+        }
+        RunnerKind::Opencode => {
+            let stopped = stop_managed_runner_bridge(runtime, RunnerBridgeKind::Opencode)?;
+            if stopped {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "stop run opencode failed: managed OpenCode Telegram bridge is still running"
+                ))
+            }
+        }
+    }
+}
+
+fn parse_stop_runner_target(cmd: &[String]) -> Result<RunnerKind> {
+    if cmd.len() != 1 {
+        return Err(anyhow!(
+            "stop run expects exactly one runner id after `--` (openclaw|claudecode|opencode). Example: `agent-ruler stop run -- claudecode`"
+        ));
+    }
+    let token = cmd[0].trim().to_ascii_lowercase();
+    let runner = match token.as_str() {
+        "openclaw" | "open-claw" => RunnerKind::Openclaw,
+        "claudecode" | "claude-code" | "claude" => RunnerKind::Claudecode,
+        "opencode" | "open-code" => RunnerKind::Opencode,
+        _ => {
+            return Err(anyhow!(
+            "unknown runner id `{}` for stop run; expected one of: openclaw, claudecode, opencode",
+            cmd[0]
+        ))
+        }
+    };
+    Ok(runner)
+}
+
 /// Launch a command in a detached child so the CLI can return immediately (used for `openclaw gateway`).
 /// Gateway launches are serialized: we remember the managed PID, stop any host gateway, and record logs+pid.
 fn spawn_background_run(
@@ -1322,6 +1858,7 @@ fn spawn_background_run(
     }
 
     let gateway_launch = is_openclaw_gateway_launch(cmd);
+    let runner_web_launch = runner_web_kind_for_launch_command(cmd);
     let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
     if gateway_launch {
         // Enforce a single managed detached gateway per runtime by honoring
@@ -1354,6 +1891,45 @@ fn spawn_background_run(
             return Ok(());
         }
     }
+    if let Some(kind) = runner_web_launch {
+        let record_path = runner_web_pid_record_file(runtime, kind);
+        if record_path.exists() {
+            if let Some(pid) = read_pid_from_record(&record_path)? {
+                if process_exists(pid) {
+                    return Err(anyhow!(
+                        "managed {} web session is already running (pid: {}). Stop it first with `agent-ruler run -- {} {} stop`.",
+                        kind.display_name(),
+                        pid,
+                        runner_web_stop_command_runner_name(kind),
+                        runner_web_stop_subcommand(kind),
+                    ));
+                }
+            }
+            let _ = remove_if_exists(&record_path);
+        }
+        if kind == RunnerWebKind::Opencode {
+            if let Some((host, port)) = parse_opencode_requested_bind(cmd) {
+                match opencode_requested_bind_available(&host, port) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(anyhow!(
+                            "OpenCode web launch refused: {}:{} is already in use outside the managed runtime. Stop that listener or choose a different `--port`, then retry.",
+                            host,
+                            port
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(anyhow!(
+                            "OpenCode web launch refused: unable to verify {}:{} before startup: {}",
+                            host,
+                            port,
+                            err
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if gateway_launch {
         // Best-effort cleanup of unmanaged host gateway instances to reduce
         // port conflicts before managed detached launch.
@@ -1363,6 +1939,8 @@ fn spawn_background_run(
     fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
     let log_path = if gateway_launch {
         logs_dir.join(GATEWAY_LOG_FILE_NAME)
+    } else if let Some(kind) = runner_web_launch {
+        logs_dir.join(kind.log_file_name())
     } else {
         logs_dir.join("agent-ruler-run.log")
     };
@@ -1385,7 +1963,7 @@ fn spawn_background_run(
         .arg("--runtime-dir")
         .arg(&runtime.config.runtime_root)
         .arg("run");
-    if gateway_launch {
+    if gateway_launch || runner_web_launch.is_some() {
         child_cmd.arg("--foreground");
     }
     child_cmd.arg("--");
@@ -1403,7 +1981,7 @@ fn spawn_background_run(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
 
-    let child = child_cmd.spawn().context("spawn background run command")?;
+    let mut child = child_cmd.spawn().context("spawn background run command")?;
 
     if gateway_launch {
         // Gateway writes its own process PID to logs after daemonization.
@@ -1416,6 +1994,44 @@ fn spawn_background_run(
                     return Err(err);
                 }
             };
+        if !process_stays_alive(managed_pid, Duration::from_secs(1)) {
+            let _ = stop_managed_openclaw_bridge(runtime);
+            let excerpt = recent_log_excerpt_since(&log_path, log_offset, 12);
+            let detail = if excerpt.is_empty() {
+                format!(
+                    "managed OpenClaw gateway process exited shortly after startup (pid: {}); check {}",
+                    managed_pid,
+                    log_path.display()
+                )
+            } else {
+                format!(
+                    "managed OpenClaw gateway process exited shortly after startup (pid: {}); check {}. Recent gateway output:\n{}",
+                    managed_pid,
+                    log_path.display(),
+                    excerpt
+                )
+            };
+            return Err(anyhow!(detail));
+        }
+        if !managed_gateway_listener_stays_detectable(runtime, Duration::from_secs(1)) {
+            let _ = stop_managed_openclaw_bridge(runtime);
+            let excerpt = recent_log_excerpt_since(&log_path, log_offset, 12);
+            let detail = if excerpt.is_empty() {
+                format!(
+                    "managed OpenClaw gateway listener was not detectable after startup (pid: {}); check {}",
+                    managed_pid,
+                    log_path.display()
+                )
+            } else {
+                format!(
+                    "managed OpenClaw gateway listener was not detectable after startup (pid: {}); check {}. Recent gateway output:\n{}",
+                    managed_pid,
+                    log_path.display(),
+                    excerpt
+                )
+            };
+            return Err(anyhow!(detail));
+        }
         write_gateway_pid_record(runtime, managed_pid, child.id(), &log_path, cmd)?;
         println!("OpenClaw gateway started detached.");
         println!("PID: {}", managed_pid);
@@ -1425,10 +2041,145 @@ fn spawn_background_run(
         return Ok(());
     }
 
+    if let Some(kind) = runner_web_launch {
+        let managed_pid = if kind == RunnerWebKind::Opencode {
+            wait_for_opencode_web_server_pid(child.id(), &log_path, log_offset, cmd)?
+        } else {
+            let startup_started = Instant::now();
+            let startup_timeout = Duration::from_secs(2);
+            loop {
+                if let Some(status) = child
+                    .try_wait()
+                    .context("poll detached runner web startup process")?
+                {
+                    let log_tail = read_log_tail(&log_path, 40);
+                    let detail = if log_tail.is_empty() {
+                        format!(
+                            "{} web startup failed: process exited with status {}. Check {}",
+                            kind.display_name(),
+                            status,
+                            log_path.display()
+                        )
+                    } else {
+                        format!(
+                            "{} web startup failed: process exited with status {}. Check {}. Recent log lines:\n{}",
+                            kind.display_name(),
+                            status,
+                            log_path.display(),
+                            log_tail
+                        )
+                    };
+                    return Err(anyhow!(detail));
+                }
+                if startup_started.elapsed() >= startup_timeout {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            child.id()
+        };
+
+        write_runner_web_pid_record(runtime, kind, managed_pid, &log_path, cmd)?;
+        println!("{} web session started detached.", kind.display_name());
+        println!("PID: {}", managed_pid);
+        if let Some(url_hint) = runner_web_url_hint_from_command(cmd) {
+            println!("web: {}", url_hint);
+        }
+        println!("logs: {}", log_path.display());
+        println!("follow logs: tail -f {}", log_path.display());
+        println!(
+            "stop command: agent-ruler run -- {} {} stop",
+            runner_web_stop_command_runner_name(kind),
+            runner_web_stop_subcommand(kind)
+        );
+        return Ok(());
+    }
+
     println!("background run started (pid: {})", child.id());
     println!("logs: {}", log_path.display());
     println!("follow logs: tail -f {}", log_path.display());
     Ok(())
+}
+
+fn append_runner_structured_output_receipt(
+    runtime: &RuntimeState,
+    receipts: &ReceiptStore,
+    cmd: &[String],
+    confinement: &str,
+    summary: &StructuredOutputSummary,
+) -> Result<()> {
+    let receipt_command = redacted_command_for_receipts(cmd);
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("runner_id".to_string(), summary.runner_id.to_string());
+    metadata.insert("parser".to_string(), summary.parser.to_string());
+    metadata.insert(
+        "payload_count".to_string(),
+        summary.payload_count.to_string(),
+    );
+    metadata.insert(
+        "tool_event_count".to_string(),
+        summary.tool_event_count.to_string(),
+    );
+    metadata.insert(
+        "approval_reference_count".to_string(),
+        summary.approval_reference_count.to_string(),
+    );
+    metadata.insert(
+        "error_event_count".to_string(),
+        summary.error_event_count.to_string(),
+    );
+    if let Some(parse_error) = summary.parse_error.as_ref() {
+        metadata.insert(
+            "parse_error".to_string(),
+            parse_error.chars().take(512).collect(),
+        );
+    }
+
+    let detail = match summary.parse_error.as_ref() {
+        Some(parse_error) => format!(
+            "structured output parse failed ({}) for {}; {}",
+            summary.parser, summary.runner_id, parse_error
+        ),
+        None => format!(
+            "structured output parsed ({}) for {}; payloads={} tool_events={} approvals={} errors={}",
+            summary.parser,
+            summary.runner_id,
+            summary.payload_count,
+            summary.tool_event_count,
+            summary.approval_reference_count,
+            summary.error_event_count
+        ),
+    };
+
+    append_receipt(
+        receipts,
+        runtime,
+        ActionRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now(),
+            kind: ActionKind::Execute,
+            operation: "runner_structured_output_parse".to_string(),
+            path: None,
+            secondary_path: None,
+            host: None,
+            metadata,
+            process: ProcessContext {
+                pid: std::process::id(),
+                ppid: None,
+                command: receipt_command,
+                process_tree: vec![std::process::id()],
+            },
+        },
+        Decision {
+            verdict: Verdict::Allow,
+            reason: ReasonCode::AllowedByPolicy,
+            detail,
+            approval_ttl_seconds: None,
+        },
+        None,
+        None,
+        &format!("{confinement}-structured-output"),
+    )
 }
 
 fn is_openclaw_gateway_launch(cmd: &[String]) -> bool {
@@ -1445,9 +2196,329 @@ fn is_openclaw_gateway_launch(cmd: &[String]) -> bool {
         .any(|token| *token == "stop" || *token == "status")
 }
 
+fn runner_web_stop_command_runner_name(kind: RunnerWebKind) -> &'static str {
+    match kind {
+        RunnerWebKind::Claudecode => "claude",
+        RunnerWebKind::Opencode => "opencode",
+    }
+}
+
+fn runner_web_stop_subcommand(kind: RunnerWebKind) -> &'static str {
+    match kind {
+        RunnerWebKind::Claudecode => "remote-control",
+        RunnerWebKind::Opencode => "web",
+    }
+}
+
 fn is_openclaw_command(cmd: &[String]) -> bool {
     let tokens = command_tokens_without_env_prefix(cmd);
     tokens.first().copied() == Some("openclaw")
+}
+
+fn is_claudecode_command(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    tokens.first().copied() == Some("claude")
+}
+
+fn is_opencode_command(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    tokens.first().copied() == Some("opencode")
+}
+
+fn claudecode_command_requires_managed_auth(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("claude") {
+        return false;
+    }
+
+    if runner_web_invocation_is_help_or_version(&tokens[1..]) {
+        return false;
+    }
+
+    let Some(mode) = tokens.get(1).copied() else {
+        // Plain `claude` starts an interactive chat session and requires auth.
+        return true;
+    };
+
+    if mode == "auth" || mode == "setup-token" {
+        return false;
+    }
+
+    if mode == "remote-control" {
+        return true;
+    }
+
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|token| *token == "-p" || *token == "--print")
+    {
+        return true;
+    }
+
+    // Non-subcommand invocation shape (prompt/options) maps to normal Claude
+    // chat execution, which requires a logged-in managed profile.
+    if mode.starts_with('-') {
+        return true;
+    }
+
+    // Known maintenance-style subcommands should remain available without
+    // login so operators can inspect/update tooling in managed runtimes.
+    if matches!(
+        mode,
+        "doctor" | "install" | "update" | "upgrade" | "mcp" | "plugin" | "agents"
+    ) {
+        return false;
+    }
+
+    true
+}
+
+fn runner_auth_prerequisite_hint(cmd: &[String], stdout: &str, stderr: &str) -> Option<String> {
+    let kind = command_runner_kind(cmd)?;
+    let mut combined = String::new();
+    if !stdout.is_empty() {
+        combined.push_str(stdout);
+        combined.push('\n');
+    }
+    combined.push_str(stderr);
+    let haystack = combined.to_ascii_lowercase();
+
+    match kind {
+        RunnerKind::Claudecode => {
+            let needs_login = haystack.contains("not logged in")
+                || haystack.contains("must be logged in")
+                || haystack.contains("please run /login")
+                || haystack.contains("run /login");
+            if needs_login {
+                return Some(
+                    "runner auth prerequisite: Claude Code managed runtime has no usable auth/config. Seed managed `settings.json` from your host Claude profile (for example API-token/base-URL auth) or run `agent-ruler run -- claude auth login` for OAuth login, then retry.".to_string(),
+                );
+            }
+        }
+        RunnerKind::Opencode => {
+            let needs_login = haystack.contains("not logged in")
+                || haystack.contains("auth login")
+                || haystack.contains("please login");
+            if needs_login {
+                return Some(
+                    "runner auth prerequisite: OpenCode managed runtime has no usable provider auth. Agent Ruler can seed host `auth.json`, or OpenCode can use provider env vars/.env visible to the managed runtime. Run `agent-ruler run -- opencode auth login` only if you want the CLI login flow, then retry.".to_string(),
+                );
+            }
+        }
+        RunnerKind::Openclaw => {}
+    }
+    None
+}
+
+fn runner_web_kind_for_launch_command(cmd: &[String]) -> Option<RunnerWebKind> {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.is_empty() {
+        return None;
+    }
+    if tokens[0] == "opencode" && tokens.get(1) == Some(&"web") {
+        if runner_web_invocation_is_help_or_version(&tokens[2..]) {
+            return None;
+        }
+        if tokens
+            .iter()
+            .skip(2)
+            .any(|token| *token == "stop" || *token == "status")
+        {
+            return None;
+        }
+        return Some(RunnerWebKind::Opencode);
+    }
+    if tokens[0] == "claude" {
+        let web_mode = tokens.get(1).copied();
+        if web_mode == Some("remote-control") {
+            if runner_web_invocation_is_help_or_version(&tokens[2..]) {
+                return None;
+            }
+            if tokens
+                .iter()
+                .skip(2)
+                .any(|token| *token == "stop" || *token == "status")
+            {
+                return None;
+            }
+            return Some(RunnerWebKind::Claudecode);
+        }
+    }
+    None
+}
+
+fn runner_web_invocation_is_help_or_version(tokens: &[&str]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "-h" | "--help" | "help" | "-V" | "--version" | "version"
+        )
+    })
+}
+
+fn runner_web_stop_kind(cmd: &[String]) -> Option<RunnerWebKind> {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.len() < 3 {
+        return None;
+    }
+    if tokens[0] == "opencode" && tokens[1] == "web" && tokens[2] == "stop" {
+        return Some(RunnerWebKind::Opencode);
+    }
+    if tokens[0] == "claude"
+        && (tokens[1] == "web" || tokens[1] == "remote-control")
+        && tokens[2] == "stop"
+    {
+        return Some(RunnerWebKind::Claudecode);
+    }
+    None
+}
+
+fn is_runner_web_launch(cmd: &[String]) -> bool {
+    runner_web_kind_for_launch_command(cmd).is_some()
+}
+
+fn runner_command_is_control_only(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.is_empty() {
+        return false;
+    }
+    if runner_web_invocation_is_help_or_version(&tokens[1..]) {
+        return true;
+    }
+    if tokens.len() < 3 {
+        return false;
+    }
+
+    matches!(
+        (tokens[0], tokens[1], tokens[2]),
+        ("openclaw", "gateway", "stop" | "status")
+            | ("opencode", "web", "stop" | "status")
+            | ("claude", "remote-control" | "web", "stop" | "status")
+    )
+}
+
+fn runner_command_requires_ui_ready(cmd: &[String]) -> bool {
+    command_runner_kind(cmd).is_some() && !runner_command_is_control_only(cmd)
+}
+
+fn claudecode_legacy_web_alias_requested(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("claude") || tokens.get(1) != Some(&"web") {
+        return false;
+    }
+    if runner_web_invocation_is_help_or_version(&tokens[2..]) {
+        return false;
+    }
+    if tokens
+        .iter()
+        .skip(2)
+        .any(|token| *token == "stop" || *token == "status")
+    {
+        return false;
+    }
+    true
+}
+
+fn inject_claudecode_governance_plugin_dir(
+    runtime: &::agent_ruler::config::RuntimeState,
+    cmd: &[String],
+) -> Vec<String> {
+    if !claudecode_command_needs_governance_plugin(cmd) {
+        return cmd.to_vec();
+    }
+
+    let Some(exec_index) = command_exec_index(cmd) else {
+        return cmd.to_vec();
+    };
+    let exec_name = Path::new(&cmd[exec_index])
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !exec_name.eq_ignore_ascii_case("claude") {
+        return cmd.to_vec();
+    }
+
+    let plugin_dir = runtime
+        .config
+        .ruler_root
+        .join(CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE);
+    if !plugin_dir.is_dir() {
+        eprintln!(
+            "claudecode governance diagnostics: plugin directory missing at {}; continuing without plugin-dir injection.",
+            plugin_dir.display()
+        );
+        return cmd.to_vec();
+    }
+
+    let tail = &cmd[exec_index + 1..];
+    let has_plugin_dir = tail.iter().any(|token| {
+        token == "--plugin-dir" || token == "--plugin-dir=" || token.starts_with("--plugin-dir=")
+    });
+
+    // `claude remote-control` expects subcommand first, then global
+    // governance flags. Injecting flags before the subcommand can be parsed as
+    // positional args by some CLI versions.
+    let inject_after_subcommand =
+        matches!(tail.first().map(String::as_str), Some("remote-control"));
+    let insert_index = if inject_after_subcommand {
+        exec_index + 2
+    } else {
+        exec_index + 1
+    };
+
+    let mut normalized = Vec::with_capacity(cmd.len() + 2);
+    normalized.extend_from_slice(&cmd[..insert_index]);
+    if !has_plugin_dir {
+        normalized.push("--plugin-dir".to_string());
+        normalized.push(plugin_dir.to_string_lossy().to_string());
+    }
+    normalized.extend_from_slice(&cmd[insert_index..]);
+    normalized
+}
+
+fn runner_web_url_hint_from_command(cmd: &[String]) -> Option<String> {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("opencode") || tokens.get(1) != Some(&"web") {
+        return None;
+    }
+
+    let mut hostname = String::from("127.0.0.1");
+    let mut port: Option<String> = None;
+    let mut index = 2usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token == "--hostname" {
+            if let Some(value) = tokens.get(index + 1) {
+                hostname = value.to_string();
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--hostname=") {
+            hostname = value.to_string();
+            index += 1;
+            continue;
+        }
+        if token == "--port" {
+            if let Some(value) = tokens.get(index + 1) {
+                port = Some(value.to_string());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--port=") {
+            port = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+
+    match port {
+        Some(value) => Some(format!("http://{hostname}:{value}/")),
+        None => None,
+    }
 }
 
 fn openclaw_command_needs_preflight_api(cmd: &[String]) -> bool {
@@ -1463,6 +2534,234 @@ fn openclaw_command_needs_preflight_api(cmd: &[String]) -> bool {
             .skip(2)
             .any(|token| *token == "stop" || *token == "status"),
         _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunnerToolPreflightKind {
+    Claudecode,
+    Opencode,
+}
+
+impl RunnerToolPreflightKind {
+    fn display_name(self) -> &'static str {
+        match self {
+            RunnerToolPreflightKind::Claudecode => "Claude Code",
+            RunnerToolPreflightKind::Opencode => "OpenCode",
+        }
+    }
+
+    fn preflight_path(self) -> &'static str {
+        match self {
+            RunnerToolPreflightKind::Claudecode => CLAUDECODE_TOOL_PREFLIGHT_PATH,
+            RunnerToolPreflightKind::Opencode => OPENCODE_TOOL_PREFLIGHT_PATH,
+        }
+    }
+
+    fn runner_id(self) -> &'static str {
+        match self {
+            RunnerToolPreflightKind::Claudecode => RunnerKind::Claudecode.id(),
+            RunnerToolPreflightKind::Opencode => RunnerKind::Opencode.id(),
+        }
+    }
+}
+
+fn runner_tool_preflight_kind_for_command(cmd: &[String]) -> Option<RunnerToolPreflightKind> {
+    if claudecode_command_needs_preflight_api(cmd) {
+        return Some(RunnerToolPreflightKind::Claudecode);
+    }
+    if opencode_command_needs_preflight_api(cmd) {
+        return Some(RunnerToolPreflightKind::Opencode);
+    }
+    None
+}
+
+fn claudecode_command_needs_preflight_api(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("claude") {
+        return false;
+    }
+    if runner_web_invocation_is_help_or_version(&tokens[1..]) {
+        return false;
+    }
+
+    let Some(mode) = tokens.get(1).copied() else {
+        // Plain `claude` interactive mode can execute tools.
+        return true;
+    };
+
+    if mode == "auth" || mode == "setup-token" {
+        return false;
+    }
+
+    // `claude remote-control` starts the browser UI session; tool
+    // calls are mediated by hooks inside that session, so launch itself should
+    // not require preflight API readiness.
+    if mode == "remote-control" {
+        return false;
+    }
+
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|token| *token == "-p" || *token == "--print")
+    {
+        return true;
+    }
+
+    if mode.starts_with('-') {
+        return true;
+    }
+
+    if matches!(
+        mode,
+        "doctor" | "install" | "update" | "upgrade" | "mcp" | "plugin" | "agents"
+    ) {
+        return false;
+    }
+
+    true
+}
+
+fn claudecode_command_needs_governance_plugin(cmd: &[String]) -> bool {
+    if claudecode_command_needs_preflight_api(cmd) {
+        return true;
+    }
+
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("claude") {
+        return false;
+    }
+    if runner_web_invocation_is_help_or_version(&tokens[1..]) {
+        return false;
+    }
+
+    matches!(tokens.get(1).copied(), Some("remote-control"))
+}
+
+fn opencode_command_needs_preflight_api(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("opencode") {
+        return false;
+    }
+    let Some(mode) = tokens.get(1).copied() else {
+        return true;
+    };
+    if runner_web_invocation_is_help_or_version(&tokens[1..]) {
+        return false;
+    }
+    if mode == "web"
+        && tokens
+            .iter()
+            .skip(2)
+            .any(|token| *token == "stop" || *token == "status")
+    {
+        return false;
+    }
+
+    // `opencode web` is a launcher command; tool mediation happens inside the
+    // managed web session plugin hooks.
+    matches!(mode, "run" | "serve") || mode.starts_with('-')
+}
+
+fn ensure_runner_tool_preflight_api_ready(
+    runtime: &::agent_ruler::config::RuntimeState,
+    cmd: &[String],
+) -> Result<()> {
+    let Some(kind) = runner_tool_preflight_kind_for_command(cmd) else {
+        return Ok(());
+    };
+
+    let bind = runtime.config.ui_bind.trim();
+    let addrs = resolve_socket_addrs(bind)?;
+    let preflight_path = kind.preflight_path();
+    if is_any_tcp_addr_reachable(&addrs) {
+        return ensure_existing_ui_supports_runner_preflight(
+            &addrs,
+            bind,
+            preflight_path,
+            kind.display_name(),
+        );
+    }
+
+    let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+    let log_path = logs_dir.join(OPENCLAW_PREFLIGHT_UI_LOG_FILE_NAME);
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("clone {}", log_path.display()))?;
+
+    let current_exe = std::env::current_exe().context("resolve current agent-ruler executable")?;
+    let mut child = Command::new(current_exe);
+    child
+        .arg("--runtime-dir")
+        .arg(&runtime.config.runtime_root)
+        .arg("ui")
+        .arg("--bind")
+        .arg(bind)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let mut child = child.spawn().with_context(|| {
+        format!(
+            "spawn background Agent Ruler UI for {} preflight",
+            kind.runner_id()
+        )
+    })?;
+    let started = Instant::now();
+    loop {
+        if is_any_tcp_addr_reachable(&addrs) {
+            match probe_runner_preflight_endpoint_status(&addrs, bind, preflight_path) {
+                Ok(Some(404)) => {
+                    let _ = child.kill();
+                    return Err(anyhow!(
+                        "{} preflight API unavailable at http://{}: endpoint {} returned HTTP 404. This usually means a stale Agent Ruler UI binary is running. Stop the existing UI and reinstall/update Agent Ruler (for local builds: `bash install/install.sh --local`).",
+                        kind.display_name(),
+                        bind,
+                        preflight_path
+                    ));
+                }
+                Ok(Some(_status)) => {
+                    eprintln!(
+                        "preflight api: started Agent Ruler UI at http://{} for {} tool mediation.",
+                        bind,
+                        kind.display_name()
+                    );
+                    return Ok(());
+                }
+                Ok(None) | Err(_) => {}
+            }
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .context("poll background Agent Ruler UI process")?
+        {
+            return Err(anyhow!(
+                "{} preflight API unavailable at http://{}; background UI exited with status {}. Check {}",
+                kind.display_name(),
+                bind,
+                status,
+                log_path.display()
+            ));
+        }
+
+        if started.elapsed() > Duration::from_secs(8) {
+            return Err(anyhow!(
+                "{} preflight API unavailable at http://{}; timed out while starting background UI. Check {}",
+                kind.display_name(),
+                bind,
+                log_path.display()
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -1554,8 +2853,162 @@ fn ensure_openclaw_preflight_api_ready(
     }
 }
 
+fn ensure_ui_ready_for_runner_web(
+    runtime: &::agent_ruler::config::RuntimeState,
+    cmd: &[String],
+) -> Result<()> {
+    let Some(kind) = runner_web_kind_for_launch_command(cmd) else {
+        return Ok(());
+    };
+
+    let bind = runtime.config.ui_bind.trim();
+    let addrs = resolve_socket_addrs(bind)?;
+    if is_any_tcp_addr_reachable(&addrs) {
+        return Ok(());
+    }
+
+    let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+    let log_path = logs_dir.join(OPENCLAW_PREFLIGHT_UI_LOG_FILE_NAME);
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("clone {}", log_path.display()))?;
+
+    let current_exe = std::env::current_exe().context("resolve current agent-ruler executable")?;
+    let mut child = Command::new(current_exe);
+    child
+        .arg("--runtime-dir")
+        .arg(&runtime.config.runtime_root)
+        .arg("ui")
+        .arg("--bind")
+        .arg(bind)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let mut child = child
+        .spawn()
+        .context("spawn background Agent Ruler UI for runner web launch")?;
+    let started = Instant::now();
+    loop {
+        if is_any_tcp_addr_reachable(&addrs) {
+            eprintln!(
+                "runner web preflight: started Agent Ruler UI at http://{} for {} web session.",
+                bind,
+                kind.display_name()
+            );
+            return Ok(());
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .context("poll background Agent Ruler UI process")?
+        {
+            return Err(anyhow!(
+                "runner web preflight: failed to start Agent Ruler UI at http://{}; background UI exited with status {}. Check {}",
+                bind,
+                status,
+                log_path.display()
+            ));
+        }
+
+        if started.elapsed() > Duration::from_secs(RUNNER_WEB_UI_STARTUP_TIMEOUT_SECS) {
+            return Err(anyhow!(
+                "runner web preflight: timed out while starting Agent Ruler UI at http://{}. Check {}",
+                bind,
+                log_path.display()
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn ensure_ui_ready_for_runner_command(
+    runtime: &::agent_ruler::config::RuntimeState,
+    cmd: &[String],
+) -> Result<()> {
+    if !runner_command_requires_ui_ready(cmd) {
+        return Ok(());
+    }
+
+    let bind = runtime.config.ui_bind.trim();
+    let addrs = resolve_socket_addrs(bind)?;
+    if is_any_tcp_addr_reachable(&addrs) {
+        return Ok(());
+    }
+
+    let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
+    fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+    let log_path = logs_dir.join(OPENCLAW_PREFLIGHT_UI_LOG_FILE_NAME);
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("clone {}", log_path.display()))?;
+
+    let current_exe = std::env::current_exe().context("resolve current agent-ruler executable")?;
+    let mut child = Command::new(current_exe);
+    child
+        .arg("--runtime-dir")
+        .arg(&runtime.config.runtime_root)
+        .arg("ui")
+        .arg("--bind")
+        .arg(bind)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let mut child = child
+        .spawn()
+        .context("spawn background Agent Ruler UI for runner command")?;
+    let started = Instant::now();
+    loop {
+        if is_any_tcp_addr_reachable(&addrs) {
+            let runner_name = command_runner_kind(cmd)
+                .map(|kind| kind.display_name())
+                .unwrap_or("runner");
+            eprintln!(
+                "runner preflight: started Agent Ruler UI at http://{} for {} command.",
+                bind, runner_name
+            );
+            return Ok(());
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .context("poll background Agent Ruler UI process")?
+        {
+            return Err(anyhow!(
+                "runner preflight: failed to start Agent Ruler UI at http://{}; background UI exited with status {}. Check {}",
+                bind,
+                status,
+                log_path.display()
+            ));
+        }
+
+        if started.elapsed() > Duration::from_secs(RUNNER_WEB_UI_STARTUP_TIMEOUT_SECS) {
+            return Err(anyhow!(
+                "runner preflight: timed out while starting Agent Ruler UI at http://{}. Check {}",
+                bind,
+                log_path.display()
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn resolve_socket_addrs(bind: &str) -> Result<Vec<SocketAddr>> {
-    let addrs = bind
+    let mut addrs = bind
         .to_socket_addrs()
         .with_context(|| format!("resolve ui bind `{bind}` for OpenClaw preflight"))?
         .collect::<Vec<_>>();
@@ -1565,6 +3018,21 @@ fn resolve_socket_addrs(bind: &str) -> Result<Vec<SocketAddr>> {
             bind
         ));
     }
+
+    // Runner tooling always targets loopback (`runner_api_base_url`), so include
+    // loopback probes even when the public bind is a concrete interface (for
+    // example Tailscale/LAN). This avoids false-negative preflight checks when
+    // an existing UI instance is reachable on local mirror sockets.
+    let port = addrs[0].port();
+    let loopback_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let loopback_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port);
+    if !addrs.contains(&loopback_v4) {
+        addrs.push(loopback_v4);
+    }
+    if !addrs.contains(&loopback_v6) {
+        addrs.push(loopback_v6);
+    }
+
     Ok(addrs)
 }
 
@@ -1577,22 +3045,39 @@ fn is_tcp_addr_reachable(addr: SocketAddr) -> bool {
 }
 
 fn ensure_existing_ui_supports_openclaw_preflight(addrs: &[SocketAddr], bind: &str) -> Result<()> {
-    match probe_openclaw_preflight_endpoint_status(addrs, bind) {
+    ensure_existing_ui_supports_runner_preflight(
+        addrs,
+        bind,
+        OPENCLAW_TOOL_PREFLIGHT_PATH,
+        "OpenClaw",
+    )
+}
+
+fn ensure_existing_ui_supports_runner_preflight(
+    addrs: &[SocketAddr],
+    bind: &str,
+    preflight_path: &str,
+    runner_name: &str,
+) -> Result<()> {
+    match probe_runner_preflight_endpoint_status(addrs, bind, preflight_path) {
         Ok(Some(404)) => Err(anyhow!(
-            "OpenClaw preflight API unavailable at http://{}: endpoint {} returned HTTP 404. A stale Agent Ruler UI process is likely running. Stop it and rerun with the current Agent Ruler binary (for local builds: `bash install/install.sh --local`).",
+            "{} preflight API unavailable at http://{}: endpoint {} returned HTTP 404. A stale Agent Ruler UI process is likely running. Stop it and rerun with the current Agent Ruler binary (for local builds: `bash install/install.sh --local`).",
+            runner_name,
             bind,
-            OPENCLAW_TOOL_PREFLIGHT_PATH
+            preflight_path
         )),
         Ok(Some(_status)) => Ok(()),
         Ok(None) => Err(anyhow!(
-            "OpenClaw preflight API probe failed at http://{}: UI port is reachable but no HTTP status was returned for {}. Check for port conflicts and restart Agent Ruler UI.",
+            "{} preflight API probe failed at http://{}: UI port is reachable but no HTTP status was returned for {}. Check for port conflicts and restart Agent Ruler UI.",
+            runner_name,
             bind,
-            OPENCLAW_TOOL_PREFLIGHT_PATH
+            preflight_path
         )),
         Err(err) => Err(anyhow!(
-            "OpenClaw preflight API probe failed at http://{} for {}: {}",
+            "{} preflight API probe failed at http://{} for {}: {}",
+            runner_name,
             bind,
-            OPENCLAW_TOOL_PREFLIGHT_PATH,
+            preflight_path,
             err
         )),
     }
@@ -1602,9 +3087,17 @@ fn probe_openclaw_preflight_endpoint_status(
     addrs: &[SocketAddr],
     host_header: &str,
 ) -> Result<Option<u16>> {
+    probe_runner_preflight_endpoint_status(addrs, host_header, OPENCLAW_TOOL_PREFLIGHT_PATH)
+}
+
+fn probe_runner_preflight_endpoint_status(
+    addrs: &[SocketAddr],
+    host_header: &str,
+    preflight_path: &str,
+) -> Result<Option<u16>> {
     let mut last_err: Option<anyhow::Error> = None;
     for addr in addrs {
-        match probe_openclaw_preflight_endpoint(*addr, host_header) {
+        match probe_runner_preflight_endpoint(*addr, host_header, preflight_path) {
             Ok(status) => return Ok(Some(status)),
             Err(err) => last_err = Some(err),
         }
@@ -1616,7 +3109,11 @@ fn probe_openclaw_preflight_endpoint_status(
     }
 }
 
-fn probe_openclaw_preflight_endpoint(addr: SocketAddr, host_header: &str) -> Result<u16> {
+fn probe_runner_preflight_endpoint(
+    addr: SocketAddr,
+    host_header: &str,
+    preflight_path: &str,
+) -> Result<u16> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(300))
         .with_context(|| format!("connect to preflight api probe target {}", addr))?;
     stream
@@ -1628,7 +3125,7 @@ fn probe_openclaw_preflight_endpoint(addr: SocketAddr, host_header: &str) -> Res
 
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        OPENCLAW_TOOL_PREFLIGHT_PATH, host_header
+        preflight_path, host_header
     );
 
     stream
@@ -1683,6 +3180,18 @@ fn parse_bind_port(bind: &str) -> u16 {
         .unwrap_or(4622)
 }
 
+fn preferred_ui_bind(current_bind: &str, tailscale_ip: Option<&str>) -> String {
+    let port = parse_bind_port(current_bind);
+    let local_bind = format!("127.0.0.1:{port}");
+    match tailscale_ip
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+    {
+        Some(ip) => format!("{ip}:{port}"),
+        None => local_bind,
+    }
+}
+
 fn detect_tailscale_ipv4() -> Result<Option<String>> {
     let output = Command::new("tailscale")
         .args(["ip", "-4"])
@@ -1708,12 +3217,11 @@ fn detect_tailscale_ipv4() -> Result<Option<String>> {
 }
 
 fn maybe_auto_configure_ui_bind_for_tailscale(runtime: &mut RuntimeState) {
-    let port = parse_bind_port(&runtime.config.ui_bind);
-    let local_bind = format!("127.0.0.1:{port}");
+    let local_bind = preferred_ui_bind(&runtime.config.ui_bind, None);
 
     let desired_bind = match detect_tailscale_ipv4() {
         Ok(Some(ip)) => {
-            let bind = format!("{ip}:{port}");
+            let bind = preferred_ui_bind(&runtime.config.ui_bind, Some(&ip));
             if bind != runtime.config.ui_bind {
                 eprintln!(
                     "tailscale auto-bind: detected {ip}; configuring Control Panel bind to {bind}."
@@ -1788,6 +3296,24 @@ fn command_tokens_without_env_prefix(cmd: &[String]) -> Vec<&str> {
         return out;
     }
     out
+}
+
+fn command_exec_index(cmd: &[String]) -> Option<usize> {
+    if cmd.is_empty() {
+        return None;
+    }
+    if cmd[0] != "env" {
+        return Some(0);
+    }
+    let mut index = 1usize;
+    while index < cmd.len() {
+        if cmd[index].contains('=') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
 }
 
 fn print_openclaw_gateway_port_diagnostics(
@@ -1996,6 +3522,18 @@ fn gateway_pid_record_file(runtime: &::agent_ruler::config::RuntimeState) -> Pat
         .join(GATEWAY_PID_RECORD_FILE_NAME)
 }
 
+fn runner_web_pid_record_file(
+    runtime: &::agent_ruler::config::RuntimeState,
+    kind: RunnerWebKind,
+) -> PathBuf {
+    runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("logs")
+        .join(kind.pid_record_file_name())
+}
+
 fn gateway_child_pid_file(runtime: &::agent_ruler::config::RuntimeState) -> PathBuf {
     runtime
         .config
@@ -2012,6 +3550,17 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn read_log_tail(path: &Path, max_lines: usize) -> String {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut lines: Vec<&str> = contents.lines().collect();
+    if lines.len() > max_lines {
+        lines.drain(0..(lines.len() - max_lines));
+    }
+    lines.join("\n")
+}
+
 /// Read appended OpenClaw log entries to capture the gateway PID after daemonization.
 fn wait_for_gateway_child_pid(
     runtime: &::agent_ruler::config::RuntimeState,
@@ -2025,15 +3574,19 @@ fn wait_for_gateway_child_pid(
     loop {
         // Prefer daemonized PID from OpenClaw logs when available.
         if let Some(pid) = parse_gateway_pid_from_log_since(log_path, log_offset) {
-            let _ = remove_if_exists(&pid_capture_file);
-            return Ok(pid);
+            if process_stays_alive(pid, Duration::from_secs(1)) {
+                let _ = remove_if_exists(&pid_capture_file);
+                return Ok(pid);
+            }
         }
         // Some OpenClaw variants daemonize without writing a parsable PID line
         // to the managed log quickly enough. Fall back to listener ownership
         // discovery scoped to the managed OPENCLAW_HOME.
         if let Some(pid) = detect_managed_gateway_listener_pid(runtime) {
-            let _ = remove_if_exists(&pid_capture_file);
-            return Ok(pid);
+            if process_stays_alive(pid, Duration::from_secs(1)) {
+                let _ = remove_if_exists(&pid_capture_file);
+                return Ok(pid);
+            }
         }
 
         // If the launcher already exited and we still cannot resolve a managed
@@ -2059,6 +3612,257 @@ fn wait_for_gateway_child_pid(
             excerpt
         ))
     }
+}
+
+fn wait_for_opencode_web_server_pid(
+    launcher_pid: u32,
+    log_path: &Path,
+    log_offset: u64,
+    cmd: &[String],
+) -> Result<u32> {
+    let started = Instant::now();
+    let max_wait = Duration::from_secs(20);
+    let mut discovered_port = parse_opencode_web_port_from_command(cmd);
+    let preexisting_pid = discovered_port.and_then(find_listener_pid_for_port);
+    let mut stable_listener_pid: Option<u32> = None;
+    let mut stable_listener_count: u8 = 0;
+
+    loop {
+        if discovered_port.is_none() {
+            discovered_port = parse_opencode_web_port_from_log_since(log_path, log_offset);
+        }
+
+        if let Some(port) = discovered_port {
+            if let Some(pid) = find_listener_pid_for_port(port) {
+                if preexisting_pid == Some(pid) {
+                    stable_listener_pid = None;
+                    stable_listener_count = 0;
+                    std::thread::sleep(Duration::from_millis(120));
+                    continue;
+                }
+                // Ignore transient ownership that points to the launcher pid.
+                // OpenCode may briefly re-parent the listener while daemonizing.
+                if pid == launcher_pid {
+                    stable_listener_pid = None;
+                    stable_listener_count = 0;
+                    std::thread::sleep(Duration::from_millis(120));
+                    continue;
+                }
+
+                if stable_listener_pid == Some(pid) {
+                    stable_listener_count = stable_listener_count.saturating_add(1);
+                } else {
+                    stable_listener_pid = Some(pid);
+                    stable_listener_count = 1;
+                }
+
+                if stable_listener_count >= 2 {
+                    return Ok(pid);
+                }
+            } else {
+                stable_listener_pid = None;
+                stable_listener_count = 0;
+            }
+        }
+
+        if started.elapsed() > max_wait {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+
+    if let Some(pid) = stable_listener_pid {
+        if process_exists(pid) {
+            return Ok(pid);
+        }
+    }
+
+    // Fallback: if launcher is still alive and listener discovery failed, use
+    // launcher PID so operator can still stop the managed process deterministically.
+    if process_exists(launcher_pid) {
+        return Ok(launcher_pid);
+    }
+
+    let excerpt = recent_log_excerpt_since(log_path, log_offset, 12);
+    if excerpt.is_empty() {
+        Err(anyhow!(
+            "failed to capture OpenCode web server pid; check log file and try again"
+        ))
+    } else {
+        Err(anyhow!(
+            "failed to capture OpenCode web server pid; check log file and try again\nrecent OpenCode output:\n{}",
+            excerpt
+        ))
+    }
+}
+
+fn parse_opencode_web_port_from_command(cmd: &[String]) -> Option<u16> {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("opencode") || tokens.get(1) != Some(&"web") {
+        return None;
+    }
+
+    let mut index = 2usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token == "--port" {
+            if let Some(value) = tokens.get(index + 1) {
+                if let Ok(port) = value.parse::<u16>() {
+                    if port > 0 {
+                        return Some(port);
+                    }
+                }
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--port=") {
+            if let Ok(port) = value.parse::<u16>() {
+                if port > 0 {
+                    return Some(port);
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_opencode_requested_bind(cmd: &[String]) -> Option<(String, u16)> {
+    let port = parse_opencode_web_port_from_command(cmd)?;
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.first().copied() != Some("opencode") || tokens.get(1) != Some(&"web") {
+        return None;
+    }
+
+    let mut hostname = String::from("127.0.0.1");
+    let mut index = 2usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token == "--hostname" {
+            if let Some(value) = tokens.get(index + 1) {
+                hostname = value.to_string();
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--hostname=") {
+            hostname = value.to_string();
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+
+    Some((hostname, port))
+}
+
+fn opencode_requested_bind_available(host: &str, port: u16) -> Result<bool> {
+    let mut attempted = false;
+    let mut last_error = None;
+    for addr in (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {host}:{port}"))?
+    {
+        attempted = true;
+        match TcpListener::bind(addr) {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(true);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => return Ok(false),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    if !attempted {
+        return Err(anyhow!("no socket addresses resolved for {host}:{port}"));
+    }
+    if let Some(err) = last_error {
+        return Err(anyhow!(err));
+    }
+    Err(anyhow!("no socket addresses resolved for {host}:{port}"))
+}
+
+fn parse_opencode_web_port_from_log_since(log_path: &Path, offset: u64) -> Option<u16> {
+    let bytes = fs::read(log_path).ok()?;
+    let start = usize::try_from(offset).ok()?.min(bytes.len());
+    let chunk = String::from_utf8_lossy(&bytes[start..]);
+    let mut cursor = 0usize;
+    while let Some(relative) = chunk[cursor..].find("http://") {
+        let absolute = cursor + relative + "http://".len();
+        let rest = &chunk[absolute..];
+        let endpoint: String = rest
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != '/' && *ch != '\0')
+            .collect();
+        if let Some((_, port_value)) = endpoint.rsplit_once(':') {
+            if let Ok(port) = port_value.parse::<u16>() {
+                if port > 0 {
+                    return Some(port);
+                }
+            }
+        }
+        cursor = absolute;
+    }
+    None
+}
+
+fn find_listener_pid_for_port(port: u16) -> Option<u32> {
+    let output = Command::new("ss").args(["-ltnp"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let needle = format!(":{port}");
+    stdout
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .find_map(parse_pid_from_ss_line)
+}
+
+fn parse_pid_from_ss_line(line: &str) -> Option<u32> {
+    let marker = "pid=";
+    let start = line.find(marker)?;
+    let digits: String = line[start + marker.len()..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u32>().ok()
+}
+
+fn process_stays_alive(pid: u32, window: Duration) -> bool {
+    if !process_exists(pid) {
+        return false;
+    }
+    let started = Instant::now();
+    while started.elapsed() < window {
+        std::thread::sleep(Duration::from_millis(100));
+        if !process_exists(pid) {
+            return false;
+        }
+    }
+    true
+}
+
+fn managed_gateway_listener_stays_detectable(
+    runtime: &::agent_ruler::config::RuntimeState,
+    window: Duration,
+) -> bool {
+    if detect_managed_gateway_listener_pid(runtime).is_none() {
+        return false;
+    }
+    let started = Instant::now();
+    while started.elapsed() < window {
+        std::thread::sleep(Duration::from_millis(100));
+        if detect_managed_gateway_listener_pid(runtime).is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_gateway_pid_from_log_since(log_path: &Path, offset: u64) -> Option<u32> {
@@ -2196,6 +4000,42 @@ fn write_gateway_pid_record(
     .with_context(|| format!("write {}", record_path.display()))
 }
 
+fn write_runner_web_pid_record(
+    runtime: &::agent_ruler::config::RuntimeState,
+    kind: RunnerWebKind,
+    pid: u32,
+    log_path: &Path,
+    cmd: &[String],
+) -> Result<()> {
+    let record_path = runner_web_pid_record_file(runtime, kind);
+    if let Some(parent) = record_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let payload = serde_json::json!({
+        "pid": pid,
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "runner_id": kind.id(),
+        "log_file": log_path.to_string_lossy().to_string(),
+        "command": cmd,
+    });
+    fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&payload).context("serialize runner web pid record")?,
+    )
+    .with_context(|| format!("write {}", record_path.display()))
+}
+
+fn read_pid_from_record(record_path: &Path) -> Result<Option<u32>> {
+    let raw = fs::read_to_string(record_path)
+        .with_context(|| format!("read {}", record_path.display()))?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", record_path.display()))?;
+    Ok(payload
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as u32))
+}
+
 /// Stop the managed gateway using the recorded PID so we never accidentally kill the wrong process.
 fn stop_managed_background_gateway(runtime: &::agent_ruler::config::RuntimeState) -> Result<bool> {
     let record_path = gateway_pid_record_file(runtime);
@@ -2253,6 +4093,63 @@ fn stop_managed_background_gateway(runtime: &::agent_ruler::config::RuntimeState
     Ok(stopped)
 }
 
+fn stop_managed_runner_web(
+    runtime: &::agent_ruler::config::RuntimeState,
+    kind: RunnerWebKind,
+) -> Result<bool> {
+    let record_path = runner_web_pid_record_file(runtime, kind);
+    if !record_path.exists() {
+        println!(
+            "{} web stop: no managed pid record found ({}).",
+            kind.id(),
+            record_path.display()
+        );
+        println!("{} web stop: nothing to stop.", kind.id());
+        return Ok(true);
+    }
+
+    let Some(pid) = read_pid_from_record(&record_path)? else {
+        remove_if_exists(&record_path)?;
+        println!(
+            "{} web stop: invalid pid record at {}; cleared stale file.",
+            kind.id(),
+            record_path.display()
+        );
+        return Ok(true);
+    };
+
+    if !process_exists(pid) {
+        remove_if_exists(&record_path)?;
+        println!(
+            "{} web stop: recorded pid {} is not running; cleared pid record.",
+            kind.id(),
+            pid
+        );
+        return Ok(true);
+    }
+
+    println!(
+        "{} web stop: stopping managed {} web process (pid: {}).",
+        kind.id(),
+        kind.display_name(),
+        pid
+    );
+    let success_template = format!(
+        "managed {} web process stopped (pid: {{}})",
+        kind.display_name()
+    );
+    let failure_template = format!(
+        "{} web stop: managed {} web pid {{}} is still alive after TERM/KILL attempts.",
+        kind.id(),
+        kind.display_name()
+    );
+    let stopped = kill_process_with_retry(pid, &success_template, &failure_template)?;
+    if stopped {
+        remove_if_exists(&record_path)?;
+    }
+    Ok(stopped)
+}
+
 fn kill_gateway_process(pid: u32) -> Result<bool> {
     kill_process_with_retry(
         pid,
@@ -2267,6 +4164,18 @@ fn kill_openclaw_bridge_process(pid: u32) -> Result<bool> {
         "managed OpenClaw channel bridge process stopped (pid: {})",
         "gateway stop: managed OpenClaw channel bridge pid {} is still alive after TERM/KILL attempts.",
     )
+}
+
+fn kill_runner_bridge_process(pid: u32, runner: RunnerBridgeKind) -> Result<bool> {
+    let success_template = format!(
+        "managed {} bridge process stopped (pid: {{}})",
+        runner.display_name()
+    );
+    let failure_template = format!(
+        "gateway stop: managed {} bridge pid {{}} is still alive after TERM/KILL attempts.",
+        runner.display_name()
+    );
+    kill_process_with_retry(pid, &success_template, &failure_template)
 }
 
 fn kill_background_launcher_process(pid: u32) -> Result<bool> {
@@ -2364,6 +4273,61 @@ fn stop_managed_openclaw_bridge(runtime: &::agent_ruler::config::RuntimeState) -
     Ok(stopped)
 }
 
+fn stop_managed_runner_bridge(
+    runtime: &::agent_ruler::config::RuntimeState,
+    runner: RunnerBridgeKind,
+) -> Result<bool> {
+    let pid_file = runner_bridge_pid_file(runtime, runner);
+    if !pid_file.exists() {
+        return Ok(true);
+    }
+
+    let raw =
+        fs::read_to_string(&pid_file).with_context(|| format!("read {}", pid_file.display()))?;
+    let pid = match raw.trim().parse::<u32>() {
+        Ok(value) => value,
+        Err(_) => {
+            remove_if_exists(&pid_file)?;
+            eprintln!(
+                "{} bridge stop: invalid pid record at {}; cleared stale file.",
+                runner.id(),
+                pid_file.display()
+            );
+            return Ok(true);
+        }
+    };
+
+    if !process_exists(pid) {
+        remove_if_exists(&pid_file)?;
+        eprintln!(
+            "{} bridge stop: recorded pid {} is not running; cleared pid record.",
+            runner.id(),
+            pid
+        );
+        return Ok(true);
+    }
+
+    eprintln!(
+        "{} bridge stop: stopping managed {} bridge process (pid: {}).",
+        runner.id(),
+        runner.display_name(),
+        pid
+    );
+    let stopped = kill_runner_bridge_process(pid, runner)?;
+    if stopped {
+        remove_if_exists(&pid_file)?;
+    }
+    Ok(stopped)
+}
+
+fn stop_managed_runner_bridges(runtime: &::agent_ruler::config::RuntimeState) -> Result<bool> {
+    // Stop each runner bridge independently so stale Claude/OpenCode bridge
+    // state cannot keep stop flow partially active.
+    let claudecode_stopped = stop_managed_runner_bridge(runtime, RunnerBridgeKind::Claudecode)?;
+    let opencode_stopped = stop_managed_runner_bridge(runtime, RunnerBridgeKind::Opencode)?;
+    Ok(claudecode_stopped && opencode_stopped)
+}
+
 fn stop_managed_background_launcher(launcher_pid: Option<u32>, gateway_pid: u32) {
     if let Some(pid) = launcher_pid.filter(|value| *value != gateway_pid) {
         match kill_background_launcher_process(pid) {
@@ -2399,15 +4363,24 @@ fn process_exists(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::process::Command;
 
     use super::{
-        kill_process_with_retry, network_policy_allows_host, openclaw_command_needs_preflight_api,
+        claudecode_command_needs_preflight_api, claudecode_command_requires_managed_auth,
+        claudecode_legacy_web_alias_requested, inject_claudecode_governance_plugin_dir,
+        is_opencode_command, kill_process_with_retry, network_policy_allows_host,
+        openclaw_command_needs_preflight_api, opencode_command_needs_preflight_api,
         parse_gateway_pid_from_listening_line, parse_gateway_pid_from_log_line,
-        parse_gateway_pid_from_log_since, parse_http_status_code, process_exists,
-        stop_managed_background_launcher,
+        parse_gateway_pid_from_log_since, parse_http_status_code,
+        parse_opencode_web_port_from_command, parse_opencode_web_port_from_log_since,
+        parse_pid_from_ss_line, parse_stop_runner_target, preferred_ui_bind, process_exists,
+        resolve_socket_addrs, runner_auth_prerequisite_hint, runner_command_requires_ui_ready,
+        runner_web_kind_for_launch_command, runner_web_stop_kind, runner_web_url_hint_from_command,
+        stop_managed_background_launcher, RunnerWebKind, CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE,
     };
-    use ::agent_ruler::config::NetworkRules;
+    use ::agent_ruler::config::{init_layout, load_runtime, NetworkRules};
+    use ::agent_ruler::runners::RunnerKind;
 
     #[test]
     fn network_policy_blocks_telegram_when_not_explicitly_allowed() {
@@ -2458,6 +4431,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_socket_addrs_adds_loopback_for_non_loopback_bind() {
+        let addrs = resolve_socket_addrs("100.89.186.26:4622").expect("resolve bind");
+        assert!(
+            addrs
+                .iter()
+                .any(|addr| addr.to_string() == "127.0.0.1:4622"),
+            "non-loopback bind probes should include loopback v4"
+        );
+        assert!(
+            addrs.iter().any(|addr| addr.to_string() == "[::1]:4622"),
+            "non-loopback bind probes should include loopback v6"
+        );
+    }
+
+    #[test]
+    fn resolve_socket_addrs_preserves_loopback_bind_without_duplicates() {
+        let addrs = resolve_socket_addrs("127.0.0.1:4622").expect("resolve bind");
+        let v4_count = addrs
+            .iter()
+            .filter(|addr| addr.to_string() == "127.0.0.1:4622")
+            .count();
+        assert_eq!(v4_count, 1, "loopback v4 should only appear once");
+    }
+
+    #[test]
+    fn preferred_ui_bind_prioritizes_tailscale_when_present() {
+        assert_eq!(
+            preferred_ui_bind("127.0.0.1:4622", Some("100.64.12.34")),
+            "100.64.12.34:4622"
+        );
+    }
+
+    #[test]
+    fn preferred_ui_bind_falls_back_to_localhost_without_tailscale() {
+        assert_eq!(
+            preferred_ui_bind("100.64.12.34:4622", None),
+            "127.0.0.1:4622"
+        );
+    }
+
+    #[test]
     fn openclaw_preflight_requirement_detects_tool_capable_commands() {
         let agent = vec!["openclaw".to_string(), "agent".to_string()];
         assert!(openclaw_command_needs_preflight_api(&agent));
@@ -2500,6 +4514,406 @@ mod tests {
             "list".to_string(),
         ];
         assert!(!openclaw_command_needs_preflight_api(&plugins));
+    }
+
+    #[test]
+    fn opencode_command_detection_accepts_plain_and_env_prefixed() {
+        let plain = vec!["opencode".to_string(), "run".to_string()];
+        assert!(is_opencode_command(&plain));
+
+        let env_prefixed = vec![
+            "env".to_string(),
+            "FOO=bar".to_string(),
+            "opencode".to_string(),
+            "run".to_string(),
+        ];
+        assert!(is_opencode_command(&env_prefixed));
+    }
+
+    #[test]
+    fn opencode_command_detection_rejects_other_commands() {
+        let openclaw = vec!["openclaw".to_string(), "gateway".to_string()];
+        assert!(!is_opencode_command(&openclaw));
+    }
+
+    #[test]
+    fn stop_runner_target_parser_accepts_runner_ids_and_aliases() {
+        assert_eq!(
+            parse_stop_runner_target(&["openclaw".to_string()]).expect("openclaw target"),
+            RunnerKind::Openclaw
+        );
+        assert_eq!(
+            parse_stop_runner_target(&["claude".to_string()]).expect("claude alias"),
+            RunnerKind::Claudecode
+        );
+        assert_eq!(
+            parse_stop_runner_target(&["opencode".to_string()]).expect("opencode target"),
+            RunnerKind::Opencode
+        );
+    }
+
+    #[test]
+    fn stop_runner_target_parser_rejects_missing_or_extra_tokens() {
+        assert!(
+            parse_stop_runner_target(&[]).is_err(),
+            "missing runner id should fail"
+        );
+        assert!(
+            parse_stop_runner_target(&["openclaw".to_string(), "gateway".to_string(),]).is_err(),
+            "extra tokens should fail for the new stop-run shape"
+        );
+    }
+
+    #[test]
+    fn claudecode_auth_guard_skips_auth_login_commands() {
+        let cmd = vec![
+            "claude".to_string(),
+            "auth".to_string(),
+            "login".to_string(),
+        ];
+        assert!(
+            !claudecode_command_requires_managed_auth(&cmd),
+            "auth command should not be blocked by preflight auth guard"
+        );
+    }
+
+    #[test]
+    fn claudecode_auth_guard_requires_auth_for_print_and_web_modes() {
+        let print_cmd = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert!(claudecode_command_requires_managed_auth(&print_cmd));
+
+        let web_cmd = vec!["claude".to_string(), "remote-control".to_string()];
+        assert!(claudecode_command_requires_managed_auth(&web_cmd));
+    }
+
+    #[test]
+    fn claudecode_preflight_requirement_tracks_tool_capable_modes() {
+        let print_cmd = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert!(
+            claudecode_command_needs_preflight_api(&print_cmd),
+            "claude print mode can execute tools and must require preflight"
+        );
+
+        let auth_cmd = vec![
+            "claude".to_string(),
+            "auth".to_string(),
+            "login".to_string(),
+        ];
+        assert!(
+            !claudecode_command_needs_preflight_api(&auth_cmd),
+            "claude auth login should not require tool preflight"
+        );
+
+        let web_cmd = vec!["claude".to_string(), "remote-control".to_string()];
+        assert!(
+            !claudecode_command_needs_preflight_api(&web_cmd),
+            "claude remote-control launcher should not require preflight readiness before startup"
+        );
+    }
+
+    #[test]
+    fn opencode_preflight_requirement_detects_tool_capable_modes() {
+        let run_cmd = vec![
+            "opencode".to_string(),
+            "run".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert!(opencode_command_needs_preflight_api(&run_cmd));
+
+        let web_cmd = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "--port".to_string(),
+            "4096".to_string(),
+        ];
+        assert!(
+            !opencode_command_needs_preflight_api(&web_cmd),
+            "opencode web launcher should not require preflight readiness before startup"
+        );
+
+        let mcp_cmd = vec![
+            "opencode".to_string(),
+            "mcp".to_string(),
+            "list".to_string(),
+        ];
+        assert!(
+            !opencode_command_needs_preflight_api(&mcp_cmd),
+            "maintenance command should not require preflight API"
+        );
+    }
+
+    #[test]
+    fn claudecode_governance_plugin_injection_adds_plugin_dir_when_missing() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let runtime_root = tempfile::tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let plugin_dir = runtime
+            .config
+            .ruler_root
+            .join(CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE);
+        std::fs::create_dir_all(&plugin_dir).expect("create governance plugin dir");
+
+        let cmd = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        let injected = inject_claudecode_governance_plugin_dir(&runtime, &cmd);
+        let joined = injected.join(" ");
+        assert!(
+            joined.contains("--plugin-dir"),
+            "plugin-dir flag should be injected for tool-capable Claude commands"
+        );
+        assert!(
+            joined.contains(plugin_dir.to_string_lossy().as_ref()),
+            "injected command should reference managed governance plugin dir"
+        );
+
+        runtime.config.ruler_root = PathBuf::from("/tmp/does-not-exist");
+        let unchanged = inject_claudecode_governance_plugin_dir(&runtime, &cmd);
+        assert_eq!(
+            unchanged, cmd,
+            "missing plugin dir should keep command unchanged"
+        );
+    }
+
+    #[test]
+    fn claudecode_remote_control_launch_injection_adds_governance_flags() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let runtime_root = tempfile::tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let plugin_dir = runtime
+            .config
+            .ruler_root
+            .join(CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE);
+        std::fs::create_dir_all(&plugin_dir).expect("create governance plugin dir");
+
+        let cmd = vec![
+            "claude".to_string(),
+            "remote-control".to_string(),
+            "--port".to_string(),
+            "7667".to_string(),
+        ];
+        let injected = inject_claudecode_governance_plugin_dir(&runtime, &cmd);
+        let joined = injected.join(" ");
+        assert!(joined.contains("--plugin-dir"));
+        assert!(
+            injected.iter().any(|token| token == "remote-control"),
+            "native claude remote-control subcommand should stay unchanged"
+        );
+        let web_index = injected
+            .iter()
+            .position(|token| token == "remote-control")
+            .expect("remote-control token should be present");
+        assert_eq!(
+            injected.get(web_index + 1).map(String::as_str),
+            Some("--plugin-dir"),
+            "governance flags should be injected after remote-control subcommand"
+        );
+    }
+
+    #[test]
+    fn runner_auth_hint_detects_claudecode_login_message() {
+        let cmd = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        let hint = runner_auth_prerequisite_hint(&cmd, "", "Not logged in · Please run /login")
+            .expect("expected auth hint");
+        assert!(hint.contains("claude auth login"));
+    }
+
+    #[test]
+    fn runner_web_launch_detection_handles_opencode_and_claude_native_command() {
+        let opencode = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "--port".to_string(),
+            "4096".to_string(),
+        ];
+        assert_eq!(
+            runner_web_kind_for_launch_command(&opencode),
+            Some(RunnerWebKind::Opencode)
+        );
+
+        let claude_alias = vec!["claude".to_string(), "web".to_string()];
+        assert_eq!(runner_web_kind_for_launch_command(&claude_alias), None);
+
+        let claude_native = vec!["claude".to_string(), "remote-control".to_string()];
+        assert_eq!(
+            runner_web_kind_for_launch_command(&claude_native),
+            Some(RunnerWebKind::Claudecode)
+        );
+    }
+
+    #[test]
+    fn claudecode_legacy_web_alias_detection_skips_help_and_stop_modes() {
+        let launch = vec!["claude".to_string(), "web".to_string()];
+        assert!(claudecode_legacy_web_alias_requested(&launch));
+
+        let help = vec![
+            "claude".to_string(),
+            "web".to_string(),
+            "--help".to_string(),
+        ];
+        assert!(!claudecode_legacy_web_alias_requested(&help));
+
+        let stop = vec!["claude".to_string(), "web".to_string(), "stop".to_string()];
+        assert!(!claudecode_legacy_web_alias_requested(&stop));
+    }
+
+    #[test]
+    fn runner_web_stop_detection_maps_to_expected_runner() {
+        let opencode_stop = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "stop".to_string(),
+        ];
+        assert_eq!(
+            runner_web_stop_kind(&opencode_stop),
+            Some(RunnerWebKind::Opencode)
+        );
+
+        let claude_stop = vec![
+            "claude".to_string(),
+            "remote-control".to_string(),
+            "stop".to_string(),
+        ];
+        assert_eq!(
+            runner_web_stop_kind(&claude_stop),
+            Some(RunnerWebKind::Claudecode)
+        );
+
+        // Keep legacy stop alias support to clean up stale pid records created
+        // by older builds that launched `claude web`.
+        let claude_stop_legacy = vec!["claude".to_string(), "web".to_string(), "stop".to_string()];
+        assert_eq!(
+            runner_web_stop_kind(&claude_stop_legacy),
+            Some(RunnerWebKind::Claudecode)
+        );
+    }
+
+    #[test]
+    fn runner_web_launch_detection_skips_help_and_version_invocations() {
+        let opencode_help = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "--help".to_string(),
+        ];
+        assert_eq!(runner_web_kind_for_launch_command(&opencode_help), None);
+
+        let claude_version = vec![
+            "claude".to_string(),
+            "remote-control".to_string(),
+            "--version".to_string(),
+        ];
+        assert_eq!(runner_web_kind_for_launch_command(&claude_version), None);
+    }
+
+    #[test]
+    fn runner_ui_autostart_requirement_covers_interactive_runner_invocations() {
+        let claude_print = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert!(
+            runner_command_requires_ui_ready(&claude_print),
+            "interactive runner commands should auto-start UI preflight"
+        );
+
+        let openclaw_tui = vec!["openclaw".to_string(), "tui".to_string()];
+        assert!(
+            runner_command_requires_ui_ready(&openclaw_tui),
+            "OpenClaw interactive commands should auto-start UI preflight"
+        );
+    }
+
+    #[test]
+    fn runner_ui_autostart_requirement_skips_control_commands() {
+        let claude_stop = vec![
+            "claude".to_string(),
+            "remote-control".to_string(),
+            "stop".to_string(),
+        ];
+        assert!(
+            !runner_command_requires_ui_ready(&claude_stop),
+            "runner stop command should not auto-start UI before stopping session"
+        );
+
+        let opencode_status = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "status".to_string(),
+        ];
+        assert!(
+            !runner_command_requires_ui_ready(&opencode_status),
+            "runner status command should not auto-start UI"
+        );
+
+        let openclaw_help = vec!["openclaw".to_string(), "--help".to_string()];
+        assert!(
+            !runner_command_requires_ui_ready(&openclaw_help),
+            "help/version invocations should not auto-start UI"
+        );
+    }
+
+    #[test]
+    fn runner_web_url_hint_extracts_opencode_host_and_port() {
+        let cmd = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "--hostname=0.0.0.0".to_string(),
+            "--port".to_string(),
+            "4096".to_string(),
+        ];
+        assert_eq!(
+            runner_web_url_hint_from_command(&cmd).as_deref(),
+            Some("http://0.0.0.0:4096/")
+        );
+    }
+
+    #[test]
+    fn opencode_web_port_parser_reads_explicit_port_flag() {
+        let cmd = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "--port".to_string(),
+            "4097".to_string(),
+        ];
+        assert_eq!(parse_opencode_web_port_from_command(&cmd), Some(4097));
+    }
+
+    #[test]
+    fn opencode_web_port_parser_reads_web_interface_log_line() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-ruler-opencode-web-log-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(&path, "Web interface: http://127.0.0.1:4098/\n")
+            .expect("write test opencode log");
+        assert_eq!(parse_opencode_web_port_from_log_since(&path, 0), Some(4098));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ss_pid_parser_extracts_pid_assignment() {
+        let line =
+            "LISTEN 0      512 127.0.0.1:4097 0.0.0.0:* users:((\".opencode\",pid=244392,fd=18))";
+        assert_eq!(parse_pid_from_ss_line(line), Some(244392));
     }
 
     #[test]

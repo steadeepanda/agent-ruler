@@ -3,4 +3,6 @@
 //! These modules intentionally hold extraction points from larger runner files so
 //! setup orchestration remains readable and testable.
 
+pub mod command_contract;
+pub mod introspection;
 pub mod openclaw;

@@ -10,7 +10,8 @@ Use this skill whenever the agent is running under Agent Ruler mediation.
 4. `agent_ruler_wait_for_approval` must use full approval IDs only (no short callback aliases).
 5. Never approve/deny Agent Ruler approvals from the agent side; those are user/operator decisions.
 6. Never bypass transfer boundaries with direct shell copy/move between zones.
-7. Do not claim success until the corresponding Agent Ruler request endpoint reports a completed status.
+7. Never directly write to user destination paths from OpenClaw tools.
+8. Do not claim success until the corresponding Agent Ruler request endpoint reports a completed status.
 
 ## Zone Mental Model (Interpret User Intent Correctly)
 
@@ -30,7 +31,8 @@ When user wording is ambiguous, infer zone by ownership:
 Before import/export assumptions, consult runtime information:
 1. Read runtime/capabilities from Agent Ruler tools (`agent_ruler_capabilities` and runtime-safe metadata available through the adapter).
 2. Resolve current workspace/shared/delivery semantics from runtime-aware tool outputs.
-3. Use those resolved paths/semantics in API requests instead of guessed host paths.
+3. If the user did not specify a delivery destination, use Agent Ruler's default user destination directory from the runtime contract; do not guess alternate paths.
+4. Use those resolved paths/semantics in API requests instead of guessed host paths.
 
 ## Endpoint Contract (Tool Layer)
 
@@ -46,6 +48,7 @@ Before import/export assumptions, consult runtime information:
 - "Send/share/deliver/export this to me/them/path":
   1. `agent_ruler_request_export_stage`
   2. `agent_ruler_request_delivery`
+  3. Omit `dst` when the user did not specify a destination so Agent Ruler uses its default user destination directory.
 - "Bring/import/load this into project/workspace":
   1. `agent_ruler_request_import`
 - "Approve/deny pending request":
@@ -57,6 +60,14 @@ Before import/export assumptions, consult runtime information:
 - If request returns `pending_approval`, wait and report status; do not re-submit the same request while pending.
 - If approval ends as denied/expired/timeout, return a blocked outcome and next step guidance.
 - Prefer status/deep-link guidance for operator action context.
+
+## Telegram Session and Thread Discipline
+
+- When Telegram channel is available, use it for concise operator-facing updates (approval pending, blocked outcome, milestone completion) when that helps the user act quickly.
+- Reuse the existing related Telegram thread/session for recurring task topics (for example periodic status reports) instead of creating new threads.
+- Create a new Telegram thread/session only when the topic is substantially different, no suitable existing thread/session exists, or the prior thread is unavailable/deleted.
+- When this runner is using the threaded Telegram bridge, prefer continuation into Telegram using `/continue` in a thread; use `/continue <session-id>` or `/continue <runner-session-key>` when explicit binding is needed.
+- Keep messages brief and action-oriented; do not create noisy or duplicate thread updates.
 
 ## Anti-Bypass Rules
 

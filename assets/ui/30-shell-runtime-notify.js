@@ -5,6 +5,45 @@
   const UPDATE_CHECK_CACHE_KEY = 'ar.update.check.cache.v1';
   const UPDATE_CHECK_NOTIFIED_TAG_KEY = 'ar.update.notified_tag';
   const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
+  const RUNNER_LABELS = {
+    openclaw: 'OpenClaw',
+    claudecode: 'Claude Code',
+    opencode: 'OpenCode'
+  };
+
+  function selectedRunnerId() {
+    const runtimeRunner = String(state.runtime?.selected_runner || '').trim().toLowerCase();
+    if (runtimeRunner) return runtimeRunner;
+    return String(state.status?.selected_runner || '').trim().toLowerCase();
+  }
+
+  function selectedRunnerLabel() {
+    const runnerId = selectedRunnerId();
+    if (!runnerId) return 'Not selected';
+    return RUNNER_LABELS[runnerId] || runnerId;
+  }
+
+  function activeBridgeRunnerId() {
+    const runtimeRunner = String(state.runtime?.telegram_bridge_active_runner || '').trim().toLowerCase();
+    if (runtimeRunner) return runtimeRunner;
+    return String(state.status?.telegram_bridge_active_runner || '').trim().toLowerCase();
+  }
+
+  function activeBridgeRunnerLabel() {
+    const runnerId = activeBridgeRunnerId();
+    if (!runnerId) return 'None';
+    return RUNNER_LABELS[runnerId] || runnerId;
+  }
+
+  function telegramBridgeInSync() {
+    if (typeof state.runtime?.telegram_bridge_in_sync === 'boolean') {
+      return !!state.runtime.telegram_bridge_in_sync;
+    }
+    if (typeof state.status?.telegram_bridge_in_sync === 'boolean') {
+      return !!state.status.telegram_bridge_in_sync;
+    }
+    return true;
+  }
 
   async function refreshStatus() {
     try {
@@ -37,6 +76,7 @@
         files: 'Files',
         policy: 'Policy',
         receipts: 'Receipts',
+        runners: 'Runners',
         runtime: 'Runtime Paths',
         settings: 'Control Settings',
         execution: 'Execution Layer'
@@ -49,12 +89,16 @@
       const updateChip = state.update && state.update.update_available
         ? `<a href="/settings" class="chip chip-warning">Update: ${esc(state.update.latest_tag || 'available')}</a>`
         : '';
+      const runnerChip = `<span class="chip chip-success">Runner: ${esc(selectedRunnerLabel())}</span>`;
+      const bridgeChipClass = telegramBridgeInSync() ? 'chip' : 'chip chip-warning';
+      const bridgeChip = `<span class="${bridgeChipClass}">Telegram Bridge: ${esc(activeBridgeRunnerLabel())}</span>`;
       chips.innerHTML = `
         <span class="chip">Version: v${esc(s.app_version || '0.0.0')}</span>
+        ${runnerChip}
+        ${bridgeChip}
         ${updateChip}
         <span class="chip">Profile: ${esc(s.profile)}</span>
         <span class="chip chip-primary">Pending: ${s.pending_approvals}</span>
-        <span class="chip">Receipts: ${s.receipts_count}</span>
       `;
     }
   }
@@ -71,11 +115,13 @@
       info.innerHTML = `
         <div class="runtime-info-row"><strong>Version:</strong> v${esc(r.app_version || state.status?.app_version || '0.0.0')}</div>
         ${updateRow}
+        <div class="runtime-info-row"><strong>Selected Runner:</strong> ${esc(selectedRunnerLabel())}</div>
+        <div class="runtime-info-row"><strong>Telegram Bridge:</strong> ${esc(activeBridgeRunnerLabel())}${telegramBridgeInSync() ? '' : ' (out of sync)'}</div>
         <div class="runtime-info-row"><strong>Bind:</strong> ${esc(state.config?.ui_bind || state.runtime?.ui_bind || state.status?.ui_bind || 'n/a')}</div>
         <div class="runtime-info-row"><strong>Workspace:</strong></div>
-        <div class="runtime-info-path">${esc(r.workspace)}</div>
+        <div class="runtime-info-path">${esc(aliasRuntimePath(r.workspace))}</div>
         <div class="runtime-info-row"><strong>Shared Zone:</strong></div>
-        <div class="runtime-info-path">${esc(r.shared_zone)}</div>
+        <div class="runtime-info-path">${esc(aliasRuntimePath(r.shared_zone))}</div>
       `;
     }
     
@@ -278,6 +324,7 @@
           <div class="approval-badges">
             ${statusChip}
             <span class="chip">${esc(approval.reason)}</span>
+            <span class="chip">${esc(approval.action?.metadata?.runner_id || 'unknown')}</span>
           </div>
         </div>
         
@@ -292,6 +339,10 @@
             <div class="detail-item">
               <span class="detail-label">Operation</span>
               <span class="detail-value">${esc(approval.action?.operation)}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Runner</span>
+              <span class="detail-value">${esc(approval.action?.metadata?.runner_id || '-')}</span>
             </div>
             <div class="detail-item">
               <span class="detail-label">Source</span>

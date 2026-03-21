@@ -8,16 +8,18 @@ If you are still on setup, start with [Getting Started](/guides/getting-started)
 <details>
 <summary><strong>Expand WebUI screenshot gallery</strong></summary>
 
-These screenshots show the full operator journey across the Control Panel tabs.
+These screenshots show the full operator journey across the Control Panel tabs plus docs home.
 
-![Control Panel overview page](/images/control-webui/Screenshot%20from%202026-03-02%2019-26-47.png)
-![Control Panel approvals page](/images/control-webui/Screenshot%20from%202026-03-02%2019-26-52.png)
-![Control Panel import export page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-04.png)
-![Control Panel policy page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-16.png)
-![Control Panel runtime paths page](/images/control-webui/Screenshot%20from%202026-03-02%2019-27-48.png)
-![Control Panel settings page](/images/control-webui/Screenshot%20from%202026-03-02%2019-28-19.png)
-![Control Panel execution layer page](/images/control-webui/Screenshot%20from%202026-03-02%2019-28-35.png)
-![Control Panel timeline page](/images/control-webui/Screenshot%20from%202026-03-02%2019-30-02.png)
+![Control Panel overview page](/images/control-webui/control-overview.png)
+![Control Panel approvals page](/images/control-webui/control-approvals.png)
+![Control Panel import export page](/images/control-webui/control-import-export.png)
+![Control Panel policy page](/images/control-webui/control-policy.png)
+![Control Panel runtime paths page](/images/control-webui/control-runtime-paths.png)
+![Control Panel settings page](/images/control-webui/control-settings.png)
+![Control Panel execution layer page](/images/control-webui/control-execution-layer.png)
+![Control Panel timeline page](/images/control-webui/control-timeline.png)
+![Control Panel runners page](/images/control-webui/control-runners-full.png)
+![Documentation home page](/images/control-webui/control-docs-home.png)
 
 </details>
 
@@ -31,14 +33,20 @@ These screenshots show the full operator journey across the Control Panel tabs.
 - `Control Settings`: UI/debug/runtime Control Panel settings
 - `Execution Layer`: one-shot troubleshooting runner, exec-layer reset, and full runtime reset
 - `Timeline`: receipts and filtering
+- `Runners`: per-runner install/health/mode/capability/config visibility
 
 You can collapse the left navigation to icon-only mode (or expand it back) from the sidebar/header toggle on any screen size.
 
 `Control Settings` includes:
 - `UI Bind Address`
-- `Show debug tools in UI`
 - `Allow degraded confinement fallback`
-- `Default Approval Wait Timeout (seconds)` (safe default `120`, range `1..300`)
+- `Default Approval Wait Timeout (seconds)` (safe default `90`, range `1..300`)
+- Per-runner Telegram bridge controls for `Claude Code` and `OpenCode`, including:
+  - bridge enable/disable
+  - bot token update field
+  - allowed Telegram sender IDs
+  - `Stream answers in Telegram` checkbox
+  - poll interval / decision TTL / short-id length / state file
 
 ## Policy profile quick guide
 
@@ -87,13 +95,53 @@ Use the zone browser scroll areas to inspect deeper folders before selecting sta
 
 Timeline shows receipts across governed actions.
 
-- Filters: date, verdict, text search
+- Filters: date, verdict, text search, runner (`All | OpenClaw | Claude Code | OpenCode`)
 - `Clear`: resets filters and shows full timeline
 - Default view: shows the details the agent can see (`decision.detail`)
 - `Show operator-only debug details`: reveals hidden fields (full command + diff summary) for debugging
 - `Use runtime path labels (recommended)`: shortens long paths in timeline entries (for example `WORKSPACE_PATH/...`)
+- Each row now includes `runner_id` in chips/details for cross-runner troubleshooting.
+
+On the `Runtime Paths` page, path-label aliases are intentionally not applied by default so you can inspect exact absolute paths. A local `Hide paths display` toggle is available on that page if you need to mask paths while sharing your screen.
 
 Operator-only fields stay hidden by default so shared timeline views remain safer.
+
+## Runner Fleet View
+
+Use `Monitoring -> Runners` for runner-specific facts without changing enforcement semantics:
+
+- Installed status, binary path, and detected version
+- Health and handshake status
+- Mode (`one_shot` / `service`) and supported modes
+- Managed capability profile per runner kind plus version probe
+- Managed config paths and masked env-related keys
+- Zone visibility snapshot (`Zone 0 workspace`, `Zone 2 shared`, `Zone 1 delivery`)
+- Factual warnings (for example missing executable, service persistence cautions)
+
+The same page now includes a compact `Recent Sessions` explorer for runner-bound
+sessions:
+
+- default view shows only a recent slice instead of the full history
+- search box matches session id, label/title, runner session key, and Telegram thread id
+- filters keep the list breathable: runner tab, `Status`, `Activity`, and `Channel`
+- each row shows runner label, channel badges, last activity, and Telegram thread id when present
+- `Details` opens the minimal session metadata view without leaving the page
+
+For Telegram 1:1 threaded mode, this is the fastest place to confirm that:
+
+- the thread was bound to the expected runner
+- the session stayed isolated to that runner
+- the stored Telegram thread id matches what the bot is replying from
+
+For Claude Code/OpenCode Telegram threads, Control Settings also lets you decide
+whether replies stream progressively in Telegram or only appear once the runner
+finishes. Approval requests still use the same Telegram thread binding while the
+runner is waiting on governance.
+
+Performance notes:
+- Runner metadata is preloaded on UI bootstrap and cached server-side with short TTL.
+- The UI keeps a client-side warm cache and falls back to cached metadata on transient fetch failures.
+- `Refresh` on the Runners page forces a live refresh when needed.
 
 ## Reset options
 
@@ -121,9 +169,7 @@ Use this for operator diagnostics, not as a replacement for normal agent task pi
 
 ## Next pages
 
-- OpenClaw-focused setup and approvals workflow:
-  [OpenClaw Guide](/integrations/openclaw-guide)
+- Shared + runner-specific integration workflow:
+  [Integrations Guide](/integrations/guide)
 - API-level integration and wait/resume flow:
-  [OpenClaw API Reference](/integrations/openclaw-api-reference)
-- Validation checklist before unattended runs:
-  [Manual Tests](/guides/manual-tests)
+  [Integrations API Reference](/integrations/api-reference)

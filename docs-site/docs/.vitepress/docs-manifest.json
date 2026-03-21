@@ -18,11 +18,6 @@
           "title": "Control Panel",
           "route": "guides/control-panel",
           "source": "docs-site/docs/guides/control-panel.md"
-        },
-        {
-          "title": "Manual Tests",
-          "route": "guides/manual-tests",
-          "source": "docs-site/docs/guides/manual-tests.md"
         }
       ]
     },
@@ -31,19 +26,14 @@
       "title": "Integrations",
       "items": [
         {
-          "title": "OpenClaw Guide",
-          "route": "integrations/openclaw-guide",
-          "source": "docs-site/docs/integrations/openclaw-guide.md"
+          "title": "Guide",
+          "route": "integrations/guide",
+          "source": "docs-site/docs/integrations/guide.md"
         },
         {
-          "title": "OpenClaw API Reference",
-          "route": "integrations/openclaw-api-reference",
-          "source": "docs-site/docs/integrations/openclaw-api-reference.md"
-        },
-        {
-          "title": "More Integrations (Soon)",
-          "route": "integrations/coming-soon",
-          "source": "docs-site/docs/integrations/coming-soon.md"
+          "title": "API Reference",
+          "route": "integrations/api-reference",
+          "source": "docs-site/docs/integrations/api-reference.md"
         }
       ]
     },
@@ -59,8 +49,12 @@
         {
           "title": "Architecture",
           "route": "concepts/architecture",
-          "source": "docs/architecture.md",
-          "generated": true
+          "source": "docs-site/docs/concepts/architecture.md"
+        },
+        {
+          "title": "Bridge Architecture",
+          "route": "concepts/bridge-architecture",
+          "source": "docs-site/docs/concepts/bridge-architecture.md"
         }
       ]
     },
@@ -69,10 +63,9 @@
       "title": "Security",
       "items": [
         {
-          "title": "Prompt Injection (Detailed)",
+          "title": "Security Testing (Detailed)",
           "route": "security/prompt-injection",
-          "source": "docs/security/prompt-injection.md",
-          "generated": true
+          "source": "docs-site/docs/security/prompt-injection.md"
         },
         {
           "title": "Security Policy",

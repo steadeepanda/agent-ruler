@@ -1,0 +1,17 @@
+{
+  "description": "Agent Ruler preflight enforcement for Claude Code tools",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.py\"",
+            "timeout": 360
+          }
+        ]
+      }
+    ]
+  }
+}

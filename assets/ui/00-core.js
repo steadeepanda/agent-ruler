@@ -10,8 +10,18 @@
 
   const THEME_STORAGE_KEY = 'vitepress-theme-appearance';
   const RECEIPT_DETAILS_STORAGE_KEY = 'ar.receipts.show_details';
+  const PATH_DISPLAY_RUNTIME_ALIAS_STORAGE_KEY = 'ar.paths.use_runtime_aliases';
   const RECEIPT_RUNTIME_ALIAS_STORAGE_KEY = 'ar.receipts.use_runtime_aliases';
   const TIMELINE_MODE_STORAGE_KEY = 'ar.timeline.mode';
+  const RUNNER_FILTER_STORAGE_KEY = 'ar.runner.filter';
+
+  function readRuntimeAliasPreference() {
+    const current = localStorage.getItem(PATH_DISPLAY_RUNTIME_ALIAS_STORAGE_KEY);
+    if (current === '0') return false;
+    if (current === '1') return true;
+    const legacy = localStorage.getItem(RECEIPT_RUNTIME_ALIAS_STORAGE_KEY);
+    return legacy !== '0';
+  }
 
   // ============================================
   // State Management
@@ -27,6 +37,13 @@
     profiles: [],
     domainPresets: null,
     approvals: [],
+    runnerFilter: (function() {
+      const stored = localStorage.getItem(RUNNER_FILTER_STORAGE_KEY) || 'all';
+      return ['all', 'openclaw', 'claudecode', 'opencode'].includes(stored) ? stored : 'all';
+    })(),
+    pathDisplay: {
+      useRuntimeAliases: readRuntimeAliasPreference()
+    },
     receipts: {
       items: [],
       total: 0,
@@ -35,7 +52,6 @@
       hasMore: false,
       mode: localStorage.getItem(TIMELINE_MODE_STORAGE_KEY) === 'logs' ? 'logs' : 'receipts',
       showDetails: localStorage.getItem(RECEIPT_DETAILS_STORAGE_KEY) === '1',
-      useRuntimeAliases: localStorage.getItem(RECEIPT_RUNTIME_ALIAS_STORAGE_KEY) !== '0',
       filters: {
         date: '',
         q: '',
@@ -206,9 +222,11 @@
     localStorage.setItem(RECEIPT_DETAILS_STORAGE_KEY, value ? '1' : '0');
   }
 
-  function setReceiptRuntimeAliasVisibility(enabled) {
+  function setRuntimeAliasVisibility(enabled) {
     const value = !!enabled;
-    state.receipts.useRuntimeAliases = value;
+    state.pathDisplay.useRuntimeAliases = value;
+    localStorage.setItem(PATH_DISPLAY_RUNTIME_ALIAS_STORAGE_KEY, value ? '1' : '0');
+    // Keep legacy key in sync for backward compatibility with older UI bundles.
     localStorage.setItem(RECEIPT_RUNTIME_ALIAS_STORAGE_KEY, value ? '1' : '0');
   }
 
@@ -216,6 +234,29 @@
     const normalized = mode === 'logs' ? 'logs' : 'receipts';
     state.receipts.mode = normalized;
     localStorage.setItem(TIMELINE_MODE_STORAGE_KEY, normalized);
+  }
+
+  function setRunnerFilter(runnerId) {
+    const normalized = normalizeRunnerFilter(runnerId);
+    state.runnerFilter = normalized;
+    localStorage.setItem(RUNNER_FILTER_STORAGE_KEY, normalized);
+  }
+
+  function normalizeRunnerFilter(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'openclaw' || normalized === 'claudecode' || normalized === 'opencode') {
+      return normalized;
+    }
+    return 'all';
+  }
+
+  function runnerFilterOptions() {
+    return [
+      { id: 'all', label: 'All' },
+      { id: 'openclaw', label: 'OpenClaw' },
+      { id: 'claudecode', label: 'Claude Code' },
+      { id: 'opencode', label: 'OpenCode' }
+    ];
   }
 
   function runtimePathMappings() {
@@ -234,7 +275,7 @@
 
   function aliasRuntimePath(rawPath) {
     const value = String(rawPath || '').trim();
-    if (!value || !state.receipts.useRuntimeAliases) return value;
+    if (!value || !state.pathDisplay.useRuntimeAliases) return value;
     const mappings = runtimePathMappings();
 
     for (const [label, prefix] of mappings) {
@@ -250,7 +291,7 @@
 
   function aliasRuntimeText(rawText) {
     const value = String(rawText || '');
-    if (!value || !state.receipts.useRuntimeAliases) return value;
+    if (!value || !state.pathDisplay.useRuntimeAliases) return value;
     let output = value;
     for (const [label, prefix] of runtimePathMappings()) {
       const normalizedPrefix = String(prefix || '').replace(/\/+$/, '');
@@ -469,6 +510,9 @@
         break;
       case 'receipts':
         renderReceipts(root);
+        break;
+      case 'runners':
+        renderRunners(root);
         break;
       case 'runtime':
         renderRuntime(root);

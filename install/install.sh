@@ -16,7 +16,7 @@ Notes:
   --version         Release tag for --release (default: latest release).
   --uninstall       Remove ~/.local/bin/agent-ruler (symlink or file).
   --purge-installs  Also remove ~/.local/share/agent-ruler/installs/*.
-  --purge-data      Also remove Agent Ruler runtime data under XDG data projects dir.
+  --purge-data      Also remove Agent Ruler runtime data under the resolved projects dir.
 EOF
 }
 
@@ -42,6 +42,8 @@ stop_managed_runtime_processes() {
   if [[ -x "${maybe_binary}" ]]; then
     echo "[install] stopping managed runtime processes before replacing binary"
     "${maybe_binary}" run -- openclaw gateway stop >/dev/null 2>&1 || true
+    "${maybe_binary}" run -- opencode web stop >/dev/null 2>&1 || true
+    "${maybe_binary}" run -- claude web stop >/dev/null 2>&1 || true
     "${maybe_binary}" ui stop >/dev/null 2>&1 || true
   fi
 }
@@ -534,13 +536,91 @@ EOF
 }
 
 uninstall_local() {
-  local xdg_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
-  local data_root="${xdg_data_home}/agent-ruler"
-  local installs_root="${data_root}/installs"
   local link_path="${HOME}/.local/bin/agent-ruler"
   local remove_installs="${1:-0}"
   local purge_data="${2:-0}"
   local stop_binary=""
+  local data_root=""
+  local installs_root=""
+
+  resolve_data_root_from_binary_path() {
+    local binary_path="${1:-}"
+    local resolved=""
+    local exe_dir=""
+    local install_instance_dir=""
+    local installs_dir=""
+    local user_data_root=""
+
+    if [[ -z "${binary_path}" ]]; then
+      return 1
+    fi
+
+    resolved="$(readlink -f "${binary_path}" 2>/dev/null || true)"
+    if [[ -z "${resolved}" ]]; then
+      resolved="${binary_path}"
+    fi
+
+    exe_dir="$(dirname "${resolved}")"
+    if [[ "$(basename "${exe_dir}")" == "bin" ]]; then
+      install_instance_dir="$(dirname "${exe_dir}")"
+    else
+      install_instance_dir="${exe_dir}"
+    fi
+
+    installs_dir="$(dirname "${install_instance_dir}")"
+    if [[ "$(basename "${installs_dir}")" != "installs" ]]; then
+      return 1
+    fi
+
+    user_data_root="$(dirname "${installs_dir}")"
+    if [[ "$(basename "${user_data_root}")" != "agent-ruler" ]]; then
+      return 1
+    fi
+
+    printf '%s\n' "${user_data_root}"
+    return 0
+  }
+
+  resolve_uninstall_data_root() {
+    local link_path_arg="${1:-}"
+    local stop_binary_path="${2:-}"
+    local linked_binary=""
+    local derived=""
+    local xdg_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+    local xdg_data_root="${xdg_data_home}/agent-ruler"
+    local default_data_root="${HOME}/.local/share/agent-ruler"
+
+    if [[ -L "${link_path_arg}" ]]; then
+      linked_binary="$(readlink -f "${link_path_arg}" 2>/dev/null || true)"
+      if [[ -z "${linked_binary}" ]]; then
+        linked_binary="$(readlink "${link_path_arg}" 2>/dev/null || true)"
+      fi
+      derived="$(resolve_data_root_from_binary_path "${linked_binary}" || true)"
+      if [[ -n "${derived}" ]]; then
+        printf '%s\n' "${derived}"
+        return 0
+      fi
+    fi
+
+    derived="$(resolve_data_root_from_binary_path "${stop_binary_path}" || true)"
+    if [[ -n "${derived}" ]]; then
+      printf '%s\n' "${derived}"
+      return 0
+    fi
+
+    if [[ -d "${default_data_root}/installs" || -d "${default_data_root}/projects" ]]; then
+      printf '%s\n' "${default_data_root}"
+      return 0
+    fi
+
+    if [[ -d "${xdg_data_root}/installs" || -d "${xdg_data_root}/projects" ]]; then
+      printf '%s\n' "${xdg_data_root}"
+      return 0
+    fi
+
+    printf '%s\n' "${default_data_root}"
+    return 0
+  }
 
   if [[ -L "${link_path}" ]]; then
     local linked_binary
@@ -552,6 +632,11 @@ uninstall_local() {
   if [[ -z "${stop_binary}" ]] && command -v agent-ruler >/dev/null 2>&1; then
     stop_binary="$(command -v agent-ruler)"
   fi
+
+  data_root="$(resolve_uninstall_data_root "${link_path}" "${stop_binary}")"
+  installs_root="${data_root}/installs"
+  echo "[uninstall] resolved data root ${data_root}"
+
   if [[ -n "${stop_binary}" ]]; then
     echo "[uninstall] attempting managed gateway stop via ${stop_binary} run -- openclaw gateway stop"
     if ! "${stop_binary}" run -- openclaw gateway stop >/dev/null 2>&1; then

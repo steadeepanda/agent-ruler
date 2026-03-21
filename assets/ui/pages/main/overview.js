@@ -37,19 +37,19 @@
               <div class="list-item">
                 <div class="list-item-content">
                   <div class="list-item-title">Workspace</div>
-                  <div class="list-item-description mono">${esc(r.workspace)}</div>
+                  <div class="list-item-description mono">${esc(aliasRuntimePath(r.workspace))}</div>
                 </div>
               </div>
               <div class="list-item">
                 <div class="list-item-content">
                   <div class="list-item-title">Shared Zone</div>
-                  <div class="list-item-description mono">${esc(r.shared_zone)}</div>
+                  <div class="list-item-description mono">${esc(aliasRuntimePath(r.shared_zone))}</div>
                 </div>
               </div>
               <div class="list-item">
                 <div class="list-item-content">
                   <div class="list-item-title">User Destination</div>
-                  <div class="list-item-description mono">${esc(r.default_user_destination_dir || r.default_delivery_dir)}</div>
+                  <div class="list-item-description mono">${esc(aliasRuntimePath(r.default_user_destination_dir || r.default_delivery_dir))}</div>
                 </div>
               </div>
             </div>

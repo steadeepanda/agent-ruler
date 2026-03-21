@@ -9,6 +9,7 @@ OpenClaw channels (Telegram, WhatsApp, Discord). It also accepts inbound chat co
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -20,6 +21,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -46,6 +48,40 @@ SHORT_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 OPENCLAW_BRIDGE_ROUTES_POINTER = (
     "plugins.entries.openclaw-agent-ruler-tools.config.approvalBridgeRoutes"
 )
+TRANSFER_APPROVAL_CATEGORIES = {"shared_zone_stage", "deliver"}
+TRANSFER_APPROVAL_OPERATIONS = {"export_commit", "deliver_commit", "import_copy"}
+MAX_APPROVAL_CONTEXT_PREVIEW = 4
+MAX_PREAPPROVAL_ASSISTANT_TEXT_CHARS = 3500
+RUNNER_LABELS = {
+    "claudecode": "Claude Code",
+    "opencode": "OpenCode",
+    "openclaw": "OpenClaw",
+}
+REASON_DESCRIPTIONS = {
+    "approval_required": "A protected action needs confirmation before the runner can continue.",
+    "approval_required_zone2": "Writing to the shared zone requires approval.",
+    "approval_required_export": "Moving data across Agent Ruler transfer boundaries requires approval.",
+    "approval_required_mass_delete": "This request looks like a mass delete and needs explicit approval.",
+    "approval_required_network_upload": "Uploading data to a network destination requires approval.",
+    "approval_required_large_overwrite": "A large overwrite is requested and needs approval.",
+    "approval_required_suspicious_pattern": "A high-risk operation pattern was detected and needs approval.",
+    "approval_required_elevation": "System package installation needs operator approval.",
+    "approval_required_persistence": "Persistence or startup changes need explicit approval.",
+    "approval_required_system_critical": "This touches a system-critical path and needs approval.",
+    "approval_required_user_data_write": "Writing to a user-data location needs approval.",
+}
+CATEGORY_DESCRIPTIONS = {
+    "approval_required": "A protected action needs confirmation before the runner can continue.",
+    "shared_zone_write": "Writing to the shared zone requires approval.",
+    "shared_zone_stage": "Staging files from workspace to shared zone requires approval.",
+    "deliver": "Delivering files from shared zone to user destination requires approval.",
+    "network_upload": "Uploading data to a network destination requires approval.",
+    "mass_delete": "A potential mass delete operation requires approval.",
+    "large_overwrite": "A large overwrite operation requires approval.",
+    "suspicious_pattern": "A high-risk operation pattern requires approval.",
+    "elevation": "System package installation requires operator approval.",
+    "persistence": "Persistence or startup changes require approval.",
+}
 
 _CALLBACK_PATTERN = re.compile(
     r"^ar:(approve|deny):([A-Za-z0-9._:-]+)(?::[A-Za-z0-9._~-]+)?$",
@@ -53,6 +89,10 @@ _CALLBACK_PATTERN = re.compile(
 )
 _COMMAND_PATTERN = re.compile(
     r"^/?(approve|deny)\s+([A-Za-z0-9._:-]+)(?:\s+[A-Za-z0-9._~-]+)?\s*$",
+    re.IGNORECASE,
+)
+_AR_COMMAND_PATTERN = re.compile(
+    r"^/?ar(approve|deny)\s+([A-Za-z0-9._:-]+)(?:\s+[A-Za-z0-9._~-]+)?\s*$",
     re.IGNORECASE,
 )
 _SHORT_ID_PATTERN = re.compile(r"^[A-Z2-9]{4,10}$")
@@ -65,7 +105,9 @@ class RouteConfig:
     allow_from: List[str]
     account: Optional[str] = None
     telegram_inline_buttons: bool = False
+    telegram_streaming_enabled: bool = False
     whatsapp_use_poll: bool = True
+    message_thread_id: Optional[int] = None
 
 
 @dataclass
@@ -180,6 +222,13 @@ class AgentRulerClient:
             raise BridgeError(f"unexpected wait payload: {payload!r}")
         return payload
 
+    def approval(self, approval_id: str) -> Dict[str, Any]:
+        safe = quote(approval_id, safe="")
+        payload = self._request_json("GET", f"/api/approvals/{safe}")
+        if not isinstance(payload, dict):
+            raise BridgeError(f"unexpected approval detail payload: {payload!r}")
+        return payload
+
     def _request_json(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Any:
         url = f"{self.base_url}{path}"
         data = None
@@ -230,6 +279,7 @@ class OpenClawMessenger:
         message: str,
         account: Optional[str] = None,
         telegram_buttons: Optional[List[List[Dict[str, str]]]] = None,
+        message_thread_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         cmd = [
             self.openclaw_bin,
@@ -244,6 +294,9 @@ class OpenClawMessenger:
         ]
         if account:
             cmd.extend(["--account", account])
+        if message_thread_id is not None and channel == "telegram":
+            # OpenClaw Telegram uses explicit `--thread-id` for forum topics.
+            cmd.extend(["--thread-id", str(message_thread_id)])
         if telegram_buttons is not None:
             cmd.extend(["--buttons", json.dumps(telegram_buttons, separators=(",", ":"))])
         return self._run_command(cmd)
@@ -296,9 +349,91 @@ class OpenClawMessenger:
                 "action": "typing",
             }
 
-        data = urlencode({"chat_id": chat_id, "action": "typing"}).encode("utf-8")
+        return self._telegram_post_form(
+            token=token,
+            method="sendChatAction",
+            form={"chat_id": chat_id, "action": "typing"},
+            error_prefix="telegram typing keepalive failed",
+        )
+
+    def answer_callback(
+        self,
+        *,
+        channel: str,
+        callback_query_id: str,
+        text: str,
+        account: Optional[str] = None,
+    ) -> None:
+        if channel != "telegram":
+            return
+        callback_id = callback_query_id.strip()
+        if not callback_id:
+            return
+
+        token = self._resolve_telegram_bot_token(account)
+        if not token:
+            log_info(
+                "answerCallbackQuery failed: telegram callback answer unavailable: bot token not found"
+            )
+            return
+        if self.dry_run_send:
+            return
+
+        try:
+            self._telegram_request_json(
+                token=token,
+                method="answerCallbackQuery",
+                payload={"callback_query_id": callback_id, "text": text[:180]},
+            )
+        except BridgeError as err:
+            log_info(f"answerCallbackQuery failed: {err}")
+
+    def _telegram_request_json(
+        self,
+        *,
+        token: str,
+        method: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        data = json.dumps(payload).encode("utf-8")
         request = Request(
-            url=f"https://api.telegram.org/bot{token}/sendChatAction",
+            url=f"https://api.telegram.org/bot{token}/{method}",
+            data=data,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+        except HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace") if err.fp is not None else ""
+            raise BridgeError(f"telegram {method} failed ({err.code}): {detail or err.reason}") from err
+        except URLError as err:
+            raise BridgeError(f"telegram {method} failed: {err}") from err
+
+        if not raw.strip():
+            raise BridgeError(f"telegram {method} returned empty response")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as err:
+            raise BridgeError(f"telegram {method} returned invalid JSON") from err
+        if not isinstance(parsed, dict):
+            raise BridgeError(f"telegram {method} returned malformed payload")
+        if not parsed.get("ok", False):
+            raise BridgeError(f"telegram {method} error: {parsed}")
+        return parsed
+
+    def _telegram_post_form(
+        self,
+        *,
+        token: str,
+        method: str,
+        form: Dict[str, str],
+        error_prefix: str,
+    ) -> Dict[str, Any]:
+        data = urlencode(form).encode("utf-8")
+        request = Request(
+            url=f"https://api.telegram.org/bot{token}/{method}",
             data=data,
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -308,11 +443,9 @@ class OpenClawMessenger:
                 raw = response.read().decode("utf-8", errors="replace")
         except HTTPError as err:
             detail = err.read().decode("utf-8", errors="replace") if err.fp is not None else ""
-            raise BridgeError(
-                f"telegram typing keepalive failed ({err.code}): {detail or err.reason}"
-            ) from err
+            raise BridgeError(f"{error_prefix} ({err.code}): {detail or err.reason}") from err
         except URLError as err:
-            raise BridgeError(f"telegram typing keepalive failed: {err}") from err
+            raise BridgeError(f"{error_prefix}: {err}") from err
 
         if not raw.strip():
             return {"ok": True}
@@ -468,6 +601,7 @@ class ApprovalBridgeRuntime:
             3, int(config.telegram_typing_interval_seconds)
         )
         self._last_typing_keepalive_at: Dict[Tuple[str, str, str], float] = {}
+        self._sent_preapproval_assistant_keys: Set[str] = set()
 
         for item in state.get("pending", []):
             if not isinstance(item, dict):
@@ -546,11 +680,13 @@ class ApprovalBridgeRuntime:
         self._prune_recently_resolved_short()
         events = self.client.status_feed(include_resolved=False, limit=200)
         notified = 0
+        pending_ids_in_feed: Set[str] = set()
         for event in events:
             approval_id = str(event.get("approval_id", "")).strip()
             verdict = str(event.get("verdict", "")).strip().lower()
             if not approval_id or verdict != "pending":
                 continue
+            pending_ids_in_feed.add(approval_id)
 
             pending: Optional[PendingApproval] = None
             should_notify = False
@@ -558,7 +694,10 @@ class ApprovalBridgeRuntime:
                 pending = self.pending_by_approval.get(approval_id)
                 if pending is None:
                     if approval_id in self.seen_approvals:
-                        continue
+                        log_info(
+                            "approval re-detected after local state drift: "
+                            f"approval_id={approval_id}"
+                        )
                     pending = self._register_pending_locked(approval_id)
                     self.seen_approvals.add(approval_id)
                     log_info(
@@ -575,9 +714,24 @@ class ApprovalBridgeRuntime:
                             current.notified = True
                     notified += 1
 
+        self._reconcile_non_pending(pending_ids_in_feed)
         self._emit_typing_keepalive_for_pending()
         self.persist_state()
         return {"notified": notified, "events_seen": len(events)}
+
+    def _reconcile_non_pending(self, pending_ids: Set[str]) -> None:
+        stale: List[Tuple[str, str]] = []
+        with self._lock:
+            for approval_id, pending in self.pending_by_approval.items():
+                if approval_id in pending_ids:
+                    continue
+                stale.append((approval_id, pending.short_id))
+        for approval_id, short_id in stale:
+            self._remove_pending(approval_id)
+            log_info(
+                "approval cleared: "
+                f"approval_id={approval_id} short_id={short_id} reason=no-longer-pending"
+            )
 
     def _emit_typing_keepalive_for_pending(self) -> None:
         if not self.config.telegram_typing_keepalive:
@@ -644,12 +798,14 @@ class ApprovalBridgeRuntime:
 
         parsed = parse_decision_command(inbound["content"])
         if parsed is None:
+            self._answer_callback(inbound, "🚫 Ignored")
             return {"status": "ignored", "reason": "not an approval command"}
 
         log_info(
             "inbound decision detected: "
             f"channel={inbound['channel']} sender={inbound['sender']} decision={parsed.decision} reference={parsed.reference}"
         )
+        self._answer_callback(inbound, "🚨 Processing approval decision...")
 
         route = select_route(self.config.routes, inbound)
         if route is None:
@@ -756,6 +912,19 @@ class ApprovalBridgeRuntime:
             result["feedback_message"] = feedback_message
         return result
 
+    def _answer_callback(self, inbound: Dict[str, str], text: str) -> None:
+        if inbound.get("channel") != "telegram":
+            return
+        callback_id = inbound.get("callback_query_id", "").strip()
+        if not callback_id:
+            return
+        self.messenger.answer_callback(
+            channel="telegram",
+            callback_query_id=callback_id,
+            text=text,
+            account=inbound.get("account") or None,
+        )
+
     def _resolve_via_agent_ruler(self, decision: str, approval_id: str) -> Dict[str, Any]:
         decision = decision.strip().lower()
         if decision not in {"approve", "deny"}:
@@ -826,6 +995,48 @@ class ApprovalBridgeRuntime:
                     f"approval already resolved as `{resolved_status}`; requested `{expected_status}`"
                 )
             raise BridgeError(f"`{' '.join(cmd)}` failed: {detail}")
+        stdout_detail = (run.stdout or "").strip()
+        stderr_detail = (run.stderr or "").strip()
+        combined_lower = "\n".join(part for part in [stdout_detail, stderr_detail] if part).lower()
+        if "no approvals matched" in combined_lower:
+            raise BridgeError(
+                f"`{' '.join(cmd)}` reported no approvals matched for `{approval_id}`"
+            )
+
+        wait_cmd = [agent_ruler_bin]
+        if self.config.runtime_dir:
+            wait_cmd.extend(["--runtime-dir", str(self.config.runtime_dir)])
+        wait_cmd.extend(["wait", "--id", approval_id, "--timeout", "1", "--json"])
+        wait_run = subprocess.run(wait_cmd, capture_output=True, text=True, check=False)
+        if wait_run.returncode != 0:
+            wait_detail = (wait_run.stderr or wait_run.stdout or "").strip()
+            if not wait_detail:
+                wait_detail = f"exit status {wait_run.returncode}"
+            raise BridgeError(f"`{' '.join(wait_cmd)}` failed: {wait_detail}")
+        wait_raw = (wait_run.stdout or "").strip()
+        wait_payload: Dict[str, Any] = {}
+        if wait_raw:
+            try:
+                parsed_wait = json.loads(wait_raw)
+                if isinstance(parsed_wait, dict):
+                    wait_payload = parsed_wait
+            except json.JSONDecodeError as err:
+                raise BridgeError(
+                    f"`{' '.join(wait_cmd)}` returned invalid JSON: {wait_raw[:160]}"
+                ) from err
+
+        expected_status = "approved" if decision == "approve" else "denied"
+        wait_status = str(wait_payload.get("status", "")).strip().lower()
+        if wait_status != expected_status:
+            if wait_status in {"", "pending", "timeout"}:
+                raise BridgeError(
+                    f"approval `{approval_id}` still pending after CLI fallback "
+                    f"(wait status `{wait_status or 'unknown'}`)"
+                )
+            raise BridgeError(
+                f"approval `{approval_id}` resolved as `{wait_status}` "
+                f"after CLI fallback; expected `{expected_status}`"
+            )
         return {
             "status": "approved" if decision == "approve" else "denied",
             "via": "agent-ruler-cli",
@@ -933,8 +1144,42 @@ class ApprovalBridgeRuntime:
         approval_id = pending.approval_id
         reason = str(event.get("reason_code", "approval_required"))
         category = str(event.get("category", "approval_required"))
+        runner_id = optional_text(event.get("runner_id")) or "openclaw"
+        runner_label = runner_display_label(runner_id)
         session_hint = str(event.get("session_hint", "")).strip()
+        operation = str(event.get("operation", "")).strip()
+        approval_detail: Dict[str, Any] = {}
+        action_payload: Dict[str, Any] = {}
+        detail_fetched = False
+        should_fetch_detail = not operation
+        if should_fetch_detail:
+            detail_fetched = True
+            try:
+                approval_detail = self.client.approval(approval_id)
+            except BridgeError as err:
+                log_info(f"approval detail lookup failed for {approval_id}: {err}")
+            action_raw = approval_detail.get("action")
+            if isinstance(action_raw, dict):
+                action_payload = action_raw
+            if not operation:
+                operation = str(action_payload.get("operation", "")).strip()
+        if not approval_detail and not detail_fetched:
+            try:
+                approval_detail = self.client.approval(approval_id)
+            except BridgeError:
+                approval_detail = {}
+
         link = self._make_deep_link(str(event.get("open_in_webui", f"/approvals/{approval_id}")))
+        reason_text = describe_approval_reason(reason, category)
+        why = optional_text(approval_detail.get("why")) if isinstance(approval_detail, dict) else ""
+        if why:
+            reason_text = why.replace(" | ", " - ")
+        context_rows = self._approval_context_rows(
+            event=event,
+            approval_detail=approval_detail,
+            operation=operation,
+        )
+        category_label = self._approval_category_label(category)
         delivered = 0
 
         if not self.config.routes:
@@ -947,17 +1192,28 @@ class ApprovalBridgeRuntime:
         for route in self.config.routes:
             buttons = None
             poll_note = ""
+            message_thread_id = route.message_thread_id
+            if route.channel == "telegram" and message_thread_id is None:
+                message_thread_id = self._resolve_telegram_thread_id_for_pending(event, session_hint)
+            self._maybe_send_preapproval_assistant_text(
+                route=route,
+                session_hint=session_hint,
+                pending=pending,
+                message_thread_id=message_thread_id,
+                event=event,
+                approval_detail=approval_detail,
+            )
 
             if route.channel == "telegram" and route.telegram_inline_buttons:
                 buttons = [
                     [
                         {
-                            "text": "Approve",
-                            "callback_data": f"ar:approve:{pending.short_id}",
+                            "text": "✅ Approve",
+                            "callback_data": f"/arapprove {pending.short_id}",
                         },
                         {
-                            "text": "Deny",
-                            "callback_data": f"ar:deny:{pending.short_id}",
+                            "text": "🚫 Deny",
+                            "callback_data": f"/ardeny {pending.short_id}",
                         },
                     ]
                 ]
@@ -992,9 +1248,7 @@ class ApprovalBridgeRuntime:
                         f"approval_id={approval_id} short_id={pending.short_id} channel=whatsapp transport=poll reason={err}"
                     )
 
-            heading = "🚨 *Approval Required*"
-            category_label = humanize_label(category)
-            reason_label = humanize_label(reason)
+            heading = "🚨 *Approval required*"
             msg_lines: List[str] = []
             if route.channel == "telegram" and buttons is not None:
                 # OpenClaw Telegram update sequencing uses callback message text
@@ -1002,27 +1256,54 @@ class ApprovalBridgeRuntime:
                 # approval callbacks into the control lane so button taps are
                 # not blocked behind long-running agent turns in the same chat.
                 msg_lines.append("/stop")
+                msg_lines.append("")
             msg_lines.extend(
                 [
                     heading,
-                    f"*Approval ID:* `{approval_id}`",
+                    "",
+                    f"*Runner:* {runner_label}",
                     f"*Short ID:* `{pending.short_id}`",
+                    "",
+                    "*Approval ID:*",
+                    f"`{approval_id}`",
+                    "",
+                    "*Reason:*",
+                    reason_text,
+                    "",
                     f"*Category:* {category_label}",
-                    f"*Reason:* {reason_label}",
+                    "*Status:* ⏳ Waiting for your decision. The runner is paused and will auto-resume after approval.",
                     f"*🔗 Open in Control Panel:* {link}",
                 ]
             )
             if session_hint:
                 msg_lines.insert(4, f"*Session:* {session_hint}")
+            if context_rows:
+                msg_lines.append("")
+                for label, value in context_rows:
+                    msg_lines.append(f"*{label}:*")
+                    if isinstance(value, list):
+                        msg_lines.extend([f"- {item}" for item in value])
+                    else:
+                        msg_lines.append(str(value))
+                    msg_lines.append("")
+                if msg_lines and not msg_lines[-1]:
+                    msg_lines.pop()
 
             if poll_note:
+                msg_lines.append("")
                 msg_lines.append(f"🗳️ {poll_note}")
             elif buttons is not None:
-                msg_lines.append("✅ Use the buttons below to approve or deny.")
+                msg_lines.append("")
+                msg_lines.append(
+                    f"✅ Use the buttons below, or reply `approve {pending.short_id}` / `deny {pending.short_id}`."
+                )
             else:
-                msg_lines.append("🔗 Open the Control Panel link above to approve or deny.")
+                msg_lines.append("")
+                msg_lines.append(
+                    f"Reply with `approve {pending.short_id}` or `deny {pending.short_id}`, or use the Control Panel link."
+                )
 
-            msg = "\n\n".join(msg_lines)
+            msg = "\n".join(msg_lines)
             log_info(
                 "message queued: "
                 f"approval_id={approval_id} short_id={pending.short_id} channel={route.channel} transport=text"
@@ -1034,10 +1315,12 @@ class ApprovalBridgeRuntime:
                     account=route.account,
                     message=msg,
                     telegram_buttons=buttons,
+                    message_thread_id=message_thread_id,
                 )
                 log_info(
                     "message sent: "
-                    f"approval_id={approval_id} short_id={pending.short_id} channel={route.channel} transport=text"
+                    f"approval_id={approval_id} short_id={pending.short_id} channel={route.channel} "
+                    f"thread_id={message_thread_id if message_thread_id is not None else 'none'} transport=text"
                 )
                 delivered += 1
             except BridgeError as err:
@@ -1046,6 +1329,473 @@ class ApprovalBridgeRuntime:
                     f"approval_id={approval_id} short_id={pending.short_id} channel={route.channel} transport=text reason={err}"
                 )
         return delivered
+
+    def _maybe_send_preapproval_assistant_text(
+        self,
+        *,
+        route: RouteConfig,
+        session_hint: str,
+        pending: PendingApproval,
+        message_thread_id: Optional[int],
+        event: Dict[str, Any],
+        approval_detail: Dict[str, Any],
+    ) -> None:
+        if route.channel != "telegram":
+            return
+        if route.telegram_streaming_enabled:
+            return
+        action_paths = self._approval_action_paths(event=event, approval_detail=approval_detail)
+        session_key = session_hint.strip()
+        if not session_key and not action_paths:
+            return
+        assistant_text = self._extract_preapproval_assistant_text(
+            session_hint=session_key,
+            cutoff_epoch_seconds=pending.created_at,
+            action_paths=action_paths,
+        )
+        if not assistant_text:
+            return
+        action_paths_hint = "|".join(sorted(action_paths))
+        dedupe_key = self._preapproval_assistant_key(
+            channel=route.channel,
+            target=route.target,
+            lookup_hint=session_key or action_paths_hint or "none",
+            message=assistant_text,
+        )
+        with self._lock:
+            if dedupe_key in self._sent_preapproval_assistant_keys:
+                return
+            self._sent_preapproval_assistant_keys.add(dedupe_key)
+        try:
+            self.messenger.send_text(
+                channel=route.channel,
+                target=route.target,
+                account=route.account,
+                message=assistant_text,
+                message_thread_id=message_thread_id,
+            )
+            log_info(
+                "pre-approval assistant text sent: "
+                f"session={session_key or 'none'} channel={route.channel} "
+                f"thread_id={message_thread_id if message_thread_id is not None else 'none'}"
+            )
+        except BridgeError as err:
+            log_info(
+                "pre-approval assistant text send failed: "
+                f"session={session_key or 'none'} channel={route.channel} reason={err}"
+            )
+
+    def _preapproval_assistant_key(
+        self, *, channel: str, target: str, lookup_hint: str, message: str
+    ) -> str:
+        lookup_digest = hashlib.sha256(lookup_hint.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:24]
+        return f"{channel}:{target}:{lookup_digest}:{digest}"
+
+    def _extract_preapproval_assistant_text(
+        self, *, session_hint: str, cutoff_epoch_seconds: int, action_paths: Set[str]
+    ) -> str:
+        if cutoff_epoch_seconds <= 0:
+            return ""
+        candidates = self._session_log_candidates(session_hint=session_hint)
+        if not candidates:
+            return ""
+        cutoff = int(cutoff_epoch_seconds)
+        for candidate in candidates:
+            text = self._extract_preapproval_assistant_text_from_file(
+                candidate,
+                cutoff,
+                action_paths=action_paths,
+            )
+            if text:
+                return text
+        return ""
+
+    def _session_log_candidates(self, *, session_hint: str) -> List[Path]:
+        openclaw_home = (self.config.openclaw_home or "").strip()
+        if not openclaw_home:
+            return []
+        home_path = Path(openclaw_home)
+        state_roots: List[Path] = []
+        dot_state = home_path / ".openclaw"
+        if dot_state.exists():
+            state_roots.append(dot_state)
+        if home_path.exists():
+            state_roots.append(home_path)
+
+        matches: List[Path] = []
+        for root in state_roots:
+            agents_dir = root / "agents"
+            if not agents_dir.exists():
+                continue
+            for sessions_dir in agents_dir.glob("*/sessions"):
+                if not sessions_dir.is_dir():
+                    continue
+                if session_hint:
+                    matches.extend(sorted(sessions_dir.glob(f"{session_hint}*.jsonl")))
+                else:
+                    matches.extend(sorted(sessions_dir.glob("*.jsonl")))
+
+        deduped: Dict[str, Path] = {}
+        for path in matches:
+            deduped[str(path)] = path
+        ordered = list(deduped.values())
+        ordered.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+        if not session_hint:
+            return ordered[:50]
+        return ordered
+
+    def _approval_action_paths(
+        self, *, event: Dict[str, Any], approval_detail: Dict[str, Any]
+    ) -> Set[str]:
+        action = approval_detail.get("action")
+        action_payload = action if isinstance(action, dict) else {}
+        metadata = (
+            action_payload.get("metadata")
+            if isinstance(action_payload.get("metadata"), dict)
+            else {}
+        )
+        values = [
+            event.get("path"),
+            event.get("secondary_path"),
+            event.get("resolved_src"),
+            event.get("resolved_dst"),
+            approval_detail.get("resolved_src"),
+            approval_detail.get("resolved_dst"),
+            action_payload.get("path"),
+            action_payload.get("secondary_path"),
+            metadata.get("export_src"),
+            metadata.get("export_dst"),
+            metadata.get("import_src"),
+            metadata.get("import_dst"),
+        ]
+        return {text for raw in values if (text := optional_text(raw))}
+
+    def _extract_preapproval_assistant_text_from_file(
+        self,
+        session_path: Path,
+        cutoff_epoch_seconds: int,
+        *,
+        action_paths: Set[str],
+    ) -> str:
+        latest_user_ts: Optional[int] = None
+        first_assistant_text: Optional[str] = None
+        matches_action_path = not action_paths
+        try:
+            with session_path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if not matches_action_path and any(path in line for path in action_paths):
+                        matches_action_path = True
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") != "message":
+                        continue
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    role = str(message.get("role", "")).strip().lower()
+                    timestamp_value = str(event.get("timestamp", "")).strip()
+                    event_ts = parse_iso8601_epoch(timestamp_value)
+                    if event_ts is None or event_ts > cutoff_epoch_seconds:
+                        continue
+                    if role == "user":
+                        latest_user_ts = event_ts
+                        first_assistant_text = None
+                        continue
+                    if role != "assistant" or latest_user_ts is None:
+                        continue
+                    if event_ts < latest_user_ts:
+                        continue
+                    assistant_text = extract_assistant_text(message)
+                    if not assistant_text:
+                        continue
+                    if first_assistant_text is None:
+                        first_assistant_text = assistant_text
+        except OSError:
+            return ""
+        if not matches_action_path:
+            return ""
+        return first_assistant_text or ""
+
+    def _approval_context_rows(
+        self,
+        *,
+        event: Dict[str, Any],
+        approval_detail: Dict[str, Any],
+        operation: str,
+    ) -> List[Tuple[str, Any]]:
+        action = approval_detail.get("action") if isinstance(approval_detail.get("action"), dict) else {}
+        action_metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+        event_metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        operation_value = optional_text(operation or action.get("operation") or event.get("operation"))
+        category = optional_text(event.get("category")).lower()
+        transfer_like = (
+            category in TRANSFER_APPROVAL_CATEGORIES or operation_value in TRANSFER_APPROVAL_OPERATIONS
+        )
+
+        source_path = self._first_path_value(
+            [
+                approval_detail.get("resolved_src"),
+                event.get("resolved_src"),
+                action_metadata.get("export_src"),
+                action_metadata.get("import_src"),
+                action_metadata.get("src"),
+                event_metadata.get("export_src"),
+                event_metadata.get("import_src"),
+                event_metadata.get("src"),
+                action.get("secondary_path"),
+                action.get("path"),
+                event.get("path"),
+                event.get("secondary_path"),
+            ]
+        )
+        destination_path = self._first_path_value(
+            [
+                approval_detail.get("resolved_dst"),
+                event.get("resolved_dst"),
+                action_metadata.get("export_dst"),
+                action_metadata.get("import_dst"),
+                action_metadata.get("dst"),
+                action_metadata.get("target_path"),
+                action_metadata.get("stage_ref"),
+                event_metadata.get("export_dst"),
+                event_metadata.get("import_dst"),
+                event_metadata.get("dst"),
+                event_metadata.get("target_path"),
+                event_metadata.get("stage_ref"),
+                action.get("path"),
+                action.get("secondary_path"),
+                event.get("secondary_path"),
+                event.get("path"),
+            ],
+            exclude={source_path} if source_path else set(),
+        )
+        source_display = self._alias_runtime_path(source_path) if source_path else ""
+        destination_display = self._alias_runtime_path(destination_path) if destination_path else ""
+
+        targets = self._collect_approval_targets(event, approval_detail)
+        display_targets: List[str] = []
+        seen: Set[str] = set()
+        for target in targets:
+            rendered = self._alias_runtime_path(target)
+            if not rendered or rendered in seen:
+                continue
+            seen.add(rendered)
+            display_targets.append(rendered)
+
+        rows: List[Tuple[str, Any]] = []
+        if transfer_like:
+            if source_display:
+                rows.append(("File involved", source_display))
+            if destination_display:
+                rows.append(("Destination", destination_display))
+        elif source_display:
+            rows.append(("File involved", source_display))
+
+        used = {source_display, destination_display}
+        extras = [item for item in display_targets if item not in used]
+        if extras:
+            preview = extras[:MAX_APPROVAL_CONTEXT_PREVIEW]
+            remaining = len(extras) - len(preview)
+            if remaining > 0:
+                preview.append(f"… and {remaining} more")
+            rows.append(("Context paths", preview))
+
+        if operation_value:
+            rows.append(("Operation", operation_value.replace("_", " ")))
+        return rows
+
+    def _collect_approval_targets(
+        self,
+        event: Dict[str, Any],
+        approval_detail: Dict[str, Any],
+    ) -> List[str]:
+        targets: List[str] = []
+        seen: Set[str] = set()
+
+        def add(value: Any) -> None:
+            raw = optional_text(value)
+            if not raw or raw in seen:
+                return
+            seen.add(raw)
+            targets.append(raw)
+
+        add(approval_detail.get("resolved_src"))
+        add(approval_detail.get("resolved_dst"))
+        action = approval_detail.get("action") if isinstance(approval_detail.get("action"), dict) else {}
+        add(action.get("path"))
+        add(action.get("secondary_path"))
+        metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+        for key in ("export_src", "export_dst", "import_src", "import_dst", "src", "dst", "target_path"):
+            add(metadata.get(key))
+        add(event.get("resolved_src"))
+        add(event.get("resolved_dst"))
+        add(event.get("path"))
+        add(event.get("secondary_path"))
+        event_metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        for key in ("export_src", "export_dst", "import_src", "import_dst", "src", "dst", "target_path"):
+            add(event_metadata.get(key))
+        return targets
+
+    def _first_path_value(self, values: Sequence[Any], exclude: Optional[Set[str]] = None) -> str:
+        blocked = exclude or set()
+        for value in values:
+            candidate = optional_text(value)
+            if not candidate or candidate in blocked:
+                continue
+            return candidate
+        return ""
+
+    def _approval_category_label(self, category: str) -> str:
+        raw = optional_text(category).lower() or "approval_required"
+        pretty = humanize_label(raw)
+        if pretty.lower() == raw.replace("_", " "):
+            return pretty
+        return f"{pretty} ({raw})"
+
+    def _alias_runtime_path(self, raw_path: str) -> str:
+        candidate = optional_text(raw_path)
+        if not candidate:
+            return ""
+        try:
+            path = Path(candidate)
+        except Exception:
+            return candidate
+
+        runtime_root = self.config.runtime_dir.expanduser() if self.config.runtime_dir else None
+        if path.is_absolute() and runtime_root is not None:
+            workspace_root = runtime_root / "user_data" / "runners" / "openclaw" / "workspace"
+            shared_root = runtime_root / "shared-zone"
+            rel_workspace = self._relative_if_under(path, workspace_root)
+            if rel_workspace is not None:
+                return self._compact_prefixed_path("workspace", rel_workspace)
+            rel_shared = self._relative_if_under(path, shared_root)
+            if rel_shared is not None:
+                return self._compact_prefixed_path("shared-zone", rel_shared)
+            rel_runtime = self._relative_if_under(path, runtime_root)
+            if rel_runtime is not None:
+                return self._compact_prefixed_path("runtime", rel_runtime)
+
+        if path.is_absolute():
+            home = Path.home()
+            rel_home = self._relative_if_under(path, home)
+            if rel_home is not None:
+                return self._compact_prefixed_path("~", rel_home)
+            return self._compact_absolute_path(path)
+        return candidate
+
+    def _relative_if_under(self, path: Path, root: Path) -> Optional[Path]:
+        try:
+            return path.relative_to(root)
+        except ValueError:
+            return None
+
+    def _compact_prefixed_path(self, prefix: str, relative: Path) -> str:
+        rel = relative.as_posix()
+        if rel in {"", "."}:
+            return prefix
+        parts = [part for part in rel.split("/") if part]
+        if len(parts) <= 4:
+            return f"{prefix}/{rel}"
+        return f"{prefix}/.../{'/'.join(parts[-3:])}"
+
+    def _compact_absolute_path(self, path: Path) -> str:
+        parts = [part for part in path.parts if part not in {path.anchor, "/"}]
+        if len(parts) <= 4:
+            return path.as_posix()
+        return f".../{'/'.join(parts[-3:])}"
+
+    def _resolve_telegram_thread_id_for_pending(
+        self, event: Dict[str, Any], session_hint: str
+    ) -> Optional[int]:
+        direct = self._parse_positive_int(
+            event.get("message_thread_id") or event.get("messageThreadId") or event.get("thread_id")
+        )
+        if direct is not None:
+            return direct
+
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            candidate = self._parse_positive_int(
+                metadata.get("message_thread_id")
+                or metadata.get("messageThreadId")
+                or metadata.get("thread_id")
+                or metadata.get("threadId")
+            )
+            if candidate is not None:
+                return candidate
+
+        hinted = self._thread_id_from_text(session_hint)
+        if hinted is not None:
+            return hinted
+
+        return self._active_openclaw_session_thread_id()
+
+    @staticmethod
+    def _parse_positive_int(value: Any) -> Optional[int]:
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                parsed = int(stripped)
+                if parsed > 0:
+                    return parsed
+        return None
+
+    @staticmethod
+    def _thread_id_from_text(value: str) -> Optional[int]:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        match = re.search(r"(?:topic|thread)[:#]([1-9][0-9]*)", raw, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _active_openclaw_session_thread_id(self) -> Optional[int]:
+        if not self.config.openclaw_home:
+            return None
+        sessions_path = (
+            Path(self.config.openclaw_home).expanduser()
+            / ".openclaw"
+            / "agents"
+            / "main"
+            / "sessions"
+            / "sessions.json"
+        )
+        try:
+            payload = json.loads(sessions_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        preferred = payload.get("agent:main:main")
+        candidates: List[Dict[str, Any]] = []
+        if isinstance(preferred, dict):
+            candidates.append(preferred)
+        candidates.extend(item for item in payload.values() if isinstance(item, dict))
+
+        for entry in candidates:
+            session_id = str(entry.get("sessionId", "")).strip()
+            from_session = self._thread_id_from_text(session_id)
+            if from_session is not None:
+                return from_session
+            last_thread = self._parse_positive_int(entry.get("lastThreadId"))
+            if last_thread is not None:
+                return last_thread
+            delivery = entry.get("deliveryContext")
+            if isinstance(delivery, dict):
+                delivery_thread = self._parse_positive_int(delivery.get("threadId"))
+                if delivery_thread is not None:
+                    return delivery_thread
+        return None
 
     def _make_deep_link(self, path: str) -> str:
         cleaned = path.strip() or "/approvals"
@@ -1057,11 +1807,19 @@ class ApprovalBridgeRuntime:
 
     def _reply(self, inbound: Dict[str, str], message: str, route: RouteConfig) -> None:
         reply_target = resolve_reply_target(inbound)
+        # Extract thread_id from inbound if available for replies
+        message_thread_id = None
+        if inbound.get("message_thread_id"):
+            try:
+                message_thread_id = int(inbound["message_thread_id"])
+            except (ValueError, TypeError):
+                pass
         self.messenger.send_text(
             channel=inbound["channel"],
             target=reply_target,
             account=inbound.get("account") or route.account,
             message=message,
+            message_thread_id=message_thread_id,
         )
 
     def _emit_feedback(
@@ -1112,8 +1870,38 @@ def normalize_inbound_event(payload: Dict[str, Any]) -> Optional[Dict[str, str]]
     account = str(payload.get("accountId") or payload.get("account") or "").strip()
     conversation = str(payload.get("conversationId") or "").strip()
     suppress_channel_reply = bool(payload.get("suppress_channel_reply", False))
+    message_id = str(payload.get("messageId") or payload.get("message_id") or "").strip()
 
-    return {
+    # Extract thread information from metadata for Telegram
+    message_thread_id = None
+    callback_query_id = ""
+    if channel == "telegram":
+        thread_raw = (
+            metadata.get("message_thread_id")
+            or metadata.get("messageThreadId")
+            or metadata.get("threadId")
+        )
+        if isinstance(thread_raw, int) and thread_raw > 0:
+            message_thread_id = thread_raw
+        elif isinstance(thread_raw, str) and thread_raw.strip().isdigit():
+            try:
+                message_thread_id = int(thread_raw.strip())
+            except ValueError:
+                pass
+
+        callback_query_id = extract_callback_query_id_from_metadata(metadata)
+        if (
+            not callback_query_id
+            and message_id
+            and should_fallback_callback_query_id(content, metadata)
+        ):
+            callback_query_id = message_id
+            log_info(
+                "callback_query_id fallback applied from messageId "
+                f"for telegram decision callback: message_id={message_id}"
+            )
+
+    result = {
         "channel": channel,
         "sender": sender,
         "content": content,
@@ -1121,6 +1909,12 @@ def normalize_inbound_event(payload: Dict[str, Any]) -> Optional[Dict[str, str]]
         "conversation_id": conversation,
         "suppress_channel_reply": "true" if suppress_channel_reply else "false",
     }
+    if message_thread_id is not None:
+        result["message_thread_id"] = str(message_thread_id)
+    if callback_query_id:
+        result["callback_query_id"] = callback_query_id
+
+    return result
 
 
 def normalize_channel(channel: str) -> str:
@@ -1266,30 +2060,159 @@ def extract_command_hint_from_metadata(metadata: Dict[str, Any]) -> str:
     return ""
 
 
+def extract_callback_payload_from_metadata(metadata: Dict[str, Any]) -> str:
+    if not metadata:
+        return ""
+
+    direct_keys = [
+        "callback_data",
+        "callbackData",
+        "callback",
+        "buttonData",
+        "button_data",
+        "data",
+    ]
+    for key in direct_keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = extract_callback_payload_from_metadata(value)
+            if nested:
+                return nested
+
+    for container_key in ["interaction", "telegram", "callbackQuery", "callback_query"]:
+        nested_obj = metadata.get(container_key)
+        if isinstance(nested_obj, dict):
+            nested = extract_callback_payload_from_metadata(nested_obj)
+            if nested:
+                return nested
+
+    return ""
+
+
+def has_callback_interaction_metadata(metadata: Dict[str, Any]) -> bool:
+    if not metadata:
+        return False
+
+    if extract_callback_payload_from_metadata(metadata):
+        return True
+
+    callback_obj = metadata.get("callbackQuery")
+    if isinstance(callback_obj, dict) and callback_obj:
+        return True
+    callback_obj = metadata.get("callback_query")
+    if isinstance(callback_obj, dict) and callback_obj:
+        return True
+
+    action = str(metadata.get("event_action") or "").strip().lower()
+    if "callback" in action or "button" in action:
+        return True
+
+    return False
+
+
+def should_fallback_callback_query_id(content: str, metadata: Dict[str, Any]) -> bool:
+    if has_callback_interaction_metadata(metadata):
+        return True
+
+    lowered = content.strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith("callback_data:"):
+        return True
+    if lowered.startswith("ar:approve:") or lowered.startswith("ar:deny:"):
+        return True
+    if lowered.startswith("/arapprove ") or lowered.startswith("/ardeny "):
+        return True
+    return False
+
+
+def extract_callback_query_id_from_metadata(metadata: Dict[str, Any]) -> str:
+    if not metadata:
+        return ""
+
+    direct_keys = [
+        "callback_query_id",
+        "callbackQueryId",
+        "callback_id",
+        "callbackId",
+        "query_id",
+        "queryId",
+    ]
+    for key in direct_keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, int):
+            return str(value)
+
+    for container_key in ["callbackQuery", "callback_query", "interaction", "telegram"]:
+        nested = metadata.get(container_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in ["id", *direct_keys]:
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, int):
+                return str(value)
+        nested_found = extract_callback_query_id_from_metadata(nested)
+        if nested_found:
+            return nested_found
+
+    return ""
+
+
 def parse_decision_command(text: str) -> Optional[ParsedDecisionCommand]:
     raw = text.strip()
     if not raw:
         return None
 
-    lower = raw.lower()
-    if lower.startswith("callback_data:"):
-        payload = raw.split(":", 1)[1].strip()
-        return parse_callback_payload(payload)
+    seen: Set[str] = set()
+    candidates: List[str] = [raw]
+    if "\n" in raw or "\r" in raw:
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if stripped:
+                candidates.append(stripped)
 
-    callback = parse_callback_payload(raw)
-    if callback is not None:
-        return callback
+    for candidate in candidates:
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
 
-    match = _COMMAND_PATTERN.match(raw)
-    if not match:
-        return None
+        lower = candidate.lower()
+        if lower.startswith("callback_data:"):
+            payload = candidate.split(":", 1)[1].strip()
+            parsed = parse_callback_payload(payload)
+            if parsed is not None:
+                return parsed
 
-    decision = match.group(1).lower()
-    reference = match.group(2).strip()
-    short = normalize_short_id(reference)
-    if short is not None:
-        reference = short
-    return ParsedDecisionCommand(decision=decision, reference=reference)
+        callback = parse_callback_payload(candidate)
+        if callback is not None:
+            return callback
+
+        match = _COMMAND_PATTERN.match(candidate)
+        if match:
+            decision = match.group(1).lower()
+            reference = match.group(2).strip()
+            short = normalize_short_id(reference)
+            if short is not None:
+                reference = short
+            return ParsedDecisionCommand(decision=decision, reference=reference)
+
+        ar_match = _AR_COMMAND_PATTERN.match(candidate)
+        if ar_match:
+            decision = ar_match.group(1).lower()
+            reference = ar_match.group(2).strip()
+            short = normalize_short_id(reference)
+            if short is not None:
+                reference = short
+            return ParsedDecisionCommand(decision=decision, reference=reference)
+
+    return None
 
 
 def parse_callback_payload(payload: str) -> Optional[ParsedDecisionCommand]:
@@ -1319,6 +2242,28 @@ def parse_routes(routes_raw: Any) -> List[RouteConfig]:
         if not target:
             raise BridgeError(f"route target missing for channel {channel}")
 
+        message_thread_id: Optional[int] = None
+        if channel == "telegram":
+            thread_raw = item.get("message_thread_id")
+            if thread_raw is None:
+                thread_raw = item.get("messageThreadId")
+            if isinstance(thread_raw, int) and thread_raw > 0:
+                message_thread_id = thread_raw
+            elif isinstance(thread_raw, str) and thread_raw.strip().isdigit():
+                parsed = int(thread_raw.strip())
+                if parsed > 0:
+                    message_thread_id = parsed
+
+            # Backward-compatible support for `target=chat_id#thread_id`.
+            if message_thread_id is None and "#" in target:
+                chat_id, _, raw_thread = target.partition("#")
+                candidate = raw_thread.strip()
+                if chat_id.strip() and candidate.isdigit():
+                    parsed = int(candidate)
+                    if parsed > 0:
+                        target = chat_id.strip()
+                        message_thread_id = parsed
+
         allow_from = item.get("allow_from")
         if not isinstance(allow_from, list) or not allow_from:
             raise BridgeError(f"route allow_from must be non-empty for channel {channel}")
@@ -1331,7 +2276,14 @@ def parse_routes(routes_raw: Any) -> List[RouteConfig]:
                 allow_from=normalized_allow,
                 account=str(item.get("account", "")).strip() or None,
                 telegram_inline_buttons=bool(item.get("telegram_inline_buttons", False)),
+                telegram_streaming_enabled=bool(
+                    item.get(
+                        "telegram_streaming_enabled",
+                        item.get("telegramStreamingEnabled", False),
+                    )
+                ),
                 whatsapp_use_poll=bool(item.get("whatsapp_use_poll", channel == "whatsapp")),
+                message_thread_id=message_thread_id,
             )
         )
 
@@ -1344,7 +2296,9 @@ def parse_routes_optional(routes_raw: Any) -> List[RouteConfig]:
     return parse_routes(routes_raw)
 
 
-def route_signature(routes: Sequence[RouteConfig]) -> Tuple[Tuple[str, str, str, Tuple[str, ...]], ...]:
+def route_signature(
+    routes: Sequence[RouteConfig],
+) -> Tuple[Tuple[str, str, str, Optional[int], Tuple[str, ...]], ...]:
     normalized = []
     for route in routes:
         normalized.append(
@@ -1352,28 +2306,77 @@ def route_signature(routes: Sequence[RouteConfig]) -> Tuple[Tuple[str, str, str,
                 route.channel,
                 route.account or "default",
                 route.target,
+                route.message_thread_id,
                 tuple(sorted(route.allow_from)),
             )
         )
     return tuple(sorted(normalized))
 
 
-def _route_slot_from_raw(route: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+def _route_slot_from_raw(route: Dict[str, Any]) -> Optional[Tuple[str, str, str, Optional[int]]]:
     if not isinstance(route, dict):
         return None
     channel = normalize_channel(str(route.get("channel", "")))
     target = str(route.get("target", "")).strip()
     account = str(route.get("account", "")).strip() or "default"
+    message_thread_id: Optional[int] = None
+    if channel == "telegram":
+        thread_raw = route.get("message_thread_id")
+        if thread_raw is None:
+            thread_raw = route.get("messageThreadId")
+        if isinstance(thread_raw, int) and thread_raw > 0:
+            message_thread_id = thread_raw
+        elif isinstance(thread_raw, str) and thread_raw.strip().isdigit():
+            parsed = int(thread_raw.strip())
+            if parsed > 0:
+                message_thread_id = parsed
+
+        # Backward-compatible support for `target=chat_id#thread_id`.
+        if message_thread_id is None and "#" in target:
+            chat_id, _, raw_thread = target.partition("#")
+            candidate = raw_thread.strip()
+            if chat_id.strip() and candidate.isdigit():
+                parsed = int(candidate)
+                if parsed > 0:
+                    target = chat_id.strip()
+                    message_thread_id = parsed
+
     if not channel or not target:
         return None
-    return (channel, account, target)
+    return (channel, account, target, message_thread_id)
 
 
 def merge_route_documents(
     managed_routes: Sequence[Dict[str, Any]], defaults_routes: Sequence[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = [dict(route) for route in managed_routes if isinstance(route, dict)]
-    existing_slots: Set[Tuple[str, str, str]] = set()
+    defaults_by_slot: Dict[Tuple[str, str, str, Optional[int]], Dict[str, Any]] = {}
+    for route in defaults_routes:
+        if not isinstance(route, dict):
+            continue
+        slot = _route_slot_from_raw(route)
+        if slot is None:
+            continue
+        defaults_by_slot[slot] = dict(route)
+
+    for route in merged:
+        slot = _route_slot_from_raw(route)
+        if slot is None:
+            continue
+        default_route = defaults_by_slot.get(slot)
+        if not default_route:
+            continue
+        if normalize_channel(str(route.get("channel", ""))) != "telegram":
+            continue
+        default_streaming = bool(
+            default_route.get(
+                "telegram_streaming_enabled",
+                default_route.get("telegramStreamingEnabled", False),
+            )
+        )
+        route["telegram_streaming_enabled"] = default_streaming
+
+    existing_slots: Set[Tuple[str, str, str, Optional[int]]] = set()
     for route in merged:
         slot = _route_slot_from_raw(route)
         if slot is not None:
@@ -1624,7 +2627,23 @@ def discover_routes_from_channel_defaults(
         if not bool(cfg.get("enabled")):
             continue
 
-        accounts = allow_from.get(channel, {})
+        accounts: Dict[str, List[str]] = {
+            account: list(values)
+            for account, values in allow_from.get(channel, {}).items()
+            if isinstance(account, str) and isinstance(values, list)
+        }
+        cfg_allow_from = cfg.get("allowFrom")
+        if isinstance(cfg_allow_from, list):
+            config_values = sorted(
+                {
+                    str(item).strip()
+                    for item in cfg_allow_from
+                    if str(item).strip()
+                }
+            )
+            if config_values:
+                existing = accounts.get("default", [])
+                accounts["default"] = sorted(set(existing) | set(config_values))
         for account, senders in accounts.items():
             for sender in senders:
                 key = (channel, account, sender)
@@ -1640,6 +2659,7 @@ def discover_routes_from_channel_defaults(
                     route["account"] = account
                 if channel == "telegram":
                     route["telegram_inline_buttons"] = True
+                    route["telegram_streaming_enabled"] = bool(cfg.get("streaming", False))
                 if channel == "whatsapp":
                     route["whatsapp_use_poll"] = True
                 routes.append(route)
@@ -1738,6 +2758,64 @@ def humanize_label(value: str) -> str:
     if not cleaned:
         return "Unknown"
     return " ".join(part.capitalize() for part in cleaned.split())
+
+
+def optional_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def parse_iso8601_epoch(value: str) -> Optional[int]:
+    text = optional_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def extract_assistant_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        if optional_text(item.get("type")).lower() != "text":
+            continue
+        text = optional_text(item.get("text"))
+        if text:
+            return text[:MAX_PREAPPROVAL_ASSISTANT_TEXT_CHARS]
+    return ""
+
+
+def runner_display_label(runner_id: str) -> str:
+    cleaned = optional_text(runner_id).lower()
+    if cleaned in RUNNER_LABELS:
+        return RUNNER_LABELS[cleaned]
+    return humanize_label(cleaned) if cleaned else "OpenClaw"
+
+
+def describe_approval_reason(reason_code: str, category: str) -> str:
+    reason = optional_text(reason_code).lower() or "approval_required"
+    category_clean = optional_text(category).lower() or "approval_required"
+    if reason == "approval_required_export" and category_clean == "shared_zone_stage":
+        return "Staging files from workspace to shared zone requires approval."
+    if reason == "approval_required_export" and category_clean == "deliver":
+        return "Delivering files from shared zone to a user destination requires approval."
+    message = REASON_DESCRIPTIONS.get(reason)
+    if not message:
+        message = CATEGORY_DESCRIPTIONS.get(
+            category_clean, "A protected action needs confirmation before the runner can continue."
+        )
+    return message
 
 
 class InboundHandler(BaseHTTPRequestHandler):

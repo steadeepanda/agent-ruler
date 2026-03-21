@@ -76,8 +76,9 @@ impl ApprovalStore {
 
     pub fn list_pending(&self) -> Result<Vec<ApprovalRecord>> {
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
-        self.persist(&all)?;
+        if self.expire_stale(&mut all) {
+            self.persist(&all)?;
+        }
         Ok(all
             .into_iter()
             .filter(|a| a.status == ApprovalStatus::Pending)
@@ -91,7 +92,7 @@ impl ApprovalStore {
         note: impl Into<String>,
     ) -> Result<ApprovalRecord> {
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
+        let expired = self.expire_stale(&mut all);
         if let Some(existing) = all.iter().find(|record| {
             record.status == ApprovalStatus::Pending
                 && record.reason == decision.reason
@@ -101,7 +102,9 @@ impl ApprovalStore {
                 && record.action.secondary_path == action.secondary_path
                 && record.action.host == action.host
         }) {
-            self.persist(&all)?;
+            if expired {
+                self.persist(&all)?;
+            }
             return Ok(existing.clone());
         }
 
@@ -141,16 +144,18 @@ impl ApprovalStore {
 
     pub fn get(&self, id: &str) -> Result<Option<ApprovalRecord>> {
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
-        self.persist(&all)?;
+        if self.expire_stale(&mut all) {
+            self.persist(&all)?;
+        }
         Ok(all.into_iter().find(|a| a.id == id))
     }
 
     pub fn has_active_approval_for(&self, action: &ActionRequest) -> Result<bool> {
         let scope_key = make_scope_key(action);
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
-        self.persist(&all)?;
+        if self.expire_stale(&mut all) {
+            self.persist(&all)?;
+        }
 
         Ok(all.iter().any(|a| {
             a.scope_key == scope_key
@@ -162,8 +167,10 @@ impl ApprovalStore {
     pub fn expire_now(&self) -> Result<usize> {
         let mut all = self.list_all()?;
         let before = all.len();
-        self.expire_stale(&mut all);
-        self.persist(&all)?;
+        let changed = self.expire_stale(&mut all);
+        if changed {
+            self.persist(&all)?;
+        }
         let expired = all
             .iter()
             .filter(|a| a.status == ApprovalStatus::Expired)
@@ -176,7 +183,7 @@ impl ApprovalStore {
 
     fn set_status(&self, id: &str, target: ApprovalStatus) -> Result<ApprovalRecord> {
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
+        let mut changed = self.expire_stale(&mut all);
 
         let now = Utc::now();
         let mut updated = None;
@@ -192,11 +199,14 @@ impl ApprovalStore {
                 approval.status = target;
                 approval.decided_at = Some(now);
                 updated = Some(approval.clone());
+                changed = true;
                 break;
             }
         }
 
-        self.persist(&all)?;
+        if changed {
+            self.persist(&all)?;
+        }
         updated.ok_or_else(|| anyhow!("approval {} not found", id))
     }
 
@@ -206,7 +216,7 @@ impl ApprovalStore {
         target: ApprovalStatus,
     ) -> Result<ApprovalStatusUpdate> {
         let mut all = self.list_all()?;
-        self.expire_stale(&mut all);
+        let mut changed = self.expire_stale(&mut all);
 
         let now = Utc::now();
         let mut updated = None;
@@ -219,6 +229,7 @@ impl ApprovalStore {
                         approval: approval.clone(),
                         changed: true,
                     });
+                    changed = true;
                     break;
                 }
                 if approval.status == target {
@@ -236,7 +247,9 @@ impl ApprovalStore {
             }
         }
 
-        self.persist(&all)?;
+        if changed {
+            self.persist(&all)?;
+        }
         updated.ok_or_else(|| anyhow!("approval {} not found", id))
     }
 
@@ -247,7 +260,9 @@ impl ApprovalStore {
                 .with_context(|| format!("create approvals parent {}", parent.display()))?;
         }
         let payload = serde_json::to_string_pretty(approvals).context("serialize approvals")?;
-        let temp = self.path.with_extension("json.tmp");
+        let temp = self
+            .path
+            .with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4()));
         fs::write(&temp, payload).with_context(|| format!("write {}", temp.display()))?;
         fs::rename(&temp, &self.path).with_context(|| {
             format!(
@@ -259,13 +274,16 @@ impl ApprovalStore {
         Ok(())
     }
 
-    fn expire_stale(&self, approvals: &mut [ApprovalRecord]) {
+    fn expire_stale(&self, approvals: &mut [ApprovalRecord]) -> bool {
         let now = Utc::now();
+        let mut changed = false;
         for approval in approvals {
             if approval.status == ApprovalStatus::Pending && approval.expires_at <= now {
                 approval.status = ApprovalStatus::Expired;
                 approval.decided_at = Some(now);
+                changed = true;
             }
         }
+        changed
     }
 }

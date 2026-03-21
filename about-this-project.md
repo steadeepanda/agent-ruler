@@ -1,6 +1,10 @@
+---
+title: About Agent Ruler
+---
+
 # About Agent Ruler
 
-I started the Ruler because I wanted an agent that can actually do useful things on my computer, without me supervising it all day like a babysitter.
+I started the Ruler because I wanted an agent that can actually do useful things on my computer, without me supervising it all day like a lifeguard.
 
 We have work to do. We want to cook, sleep, build stuff, go outside, touch grass, whatever. If an agent is only “safe” when we supervise it 24/7, then it’s not really helping. It’s just adding a new job I didn't apply for.
 
@@ -9,14 +13,11 @@ I’ve always been into security and privacy, so I’ve never been comfortable g
 So I decided to build an environment that makes agents feel safe enough to actually enjoy, and simple enough that other people can try it too. 
 I came up with that design seamlessly easy to integrate it with the current popular solutions.
 
-To be honest I took long before deciding to publish it. 
-I used to keep everything I create for myself 🫣, it wasn't long ago when I decided to be Steadee, go public and share with the world. Join me in my kinda new adventure !
-
 ## The vibe
 
 The Ruler is built around one simple idea:
 
-Agents useful, nerd no babysitting, nerd afk, nerd smiling, nerd happy (Yes "nerd" includes you too ;))
+Agents useful, nerd no angry bird, nerd afk, nerd smiling, nerd happy (Yes "nerd" includes you too &#59;))
 
 So the default experience should feel like this:
 
@@ -50,7 +51,7 @@ This flow graph stays aligned with the current Control Panel behavior: boundary 
 
 <div style="display:flex; justify-content:center; width:100%;">
   <img
-    src="docs-site/docs/public/images/agent-ruler-approval-flow.svg"
+    src="/images/agent-ruler-approval-flow-updated.png"
     alt="Agent Ruler boundary and approval flow"
     style="max-width:900px; width:100%; height:auto;"
   />
@@ -101,4 +102,4 @@ And if you ever catch yourself thinking “wait why is my agent trying to do tha
 
 - Setup: [Getting Started](/guides/getting-started)
 - Day-to-day UI operations: [Control Panel Guide](/guides/control-panel)
-- Agent wiring: [OpenClaw Guide](/integrations/openclaw-guide)
+- Agent wiring: [Integrations Guide](/integrations/guide)

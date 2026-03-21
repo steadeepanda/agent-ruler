@@ -25,13 +25,17 @@ use crate::helpers::approvals::{
     append_approval_resolution_receipt, append_bulk_approval_resolution_receipt,
 };
 use crate::helpers::ui::payloads::{
-    ApprovalWaitQuery, ApprovalWaitResponse, BulkApprovalResult, RedactedStatusEvent,
-    ResetRuntimePayload, RunCommandPayload, RunScriptPayload, StatusFeedQuery, TogglePayload,
-    UpdateApplyPayload,
+    ApprovalQuery, ApprovalWaitQuery, ApprovalWaitResponse, BulkApprovalResult,
+    RedactedStatusEvent, ResetRuntimePayload, RunCommandPayload, RunScriptPayload, StatusFeedQuery,
+    TogglePayload, UpdateApplyPayload,
 };
 use crate::helpers::ui::{
-    openclaw_tool_preflight as ui_openclaw_tool_preflight, pages as ui_pages,
-    runtime_api as ui_runtime_api, transfer_api as ui_transfer_api,
+    claudecode_tool_preflight as ui_claudecode_tool_preflight,
+    openclaw_tool_preflight as ui_openclaw_tool_preflight,
+    opencode_tool_preflight as ui_opencode_tool_preflight, pages as ui_pages,
+    runner_command_api as ui_runner_command_api,
+    runner_tool_preflight_common as ui_runner_tool_preflight_common, runtime_api as ui_runtime_api,
+    transfer_api as ui_transfer_api,
 };
 use crate::helpers::{
     apply_profile_preset, approval_to_view, canonical_profile_id, enforce_minimum_safety_guards,
@@ -73,6 +77,7 @@ pub fn build_router(state: WebState) -> Router {
         .route("/files", get(ui_pages::index_files))
         .route("/policy", get(ui_pages::index_policy))
         .route("/receipts", get(ui_pages::index_receipts))
+        .route("/runners", get(ui_pages::index_runners))
         .route("/runtime", get(ui_pages::index_runtime))
         .route("/settings", get(ui_pages::index_settings))
         .route("/execution", get(ui_pages::index_execution))
@@ -89,6 +94,18 @@ pub fn build_router(state: WebState) -> Router {
         .route("/api/status", get(ui_runtime_api::api_status))
         .route("/api/status/feed", get(api_status_feed))
         .route("/api/runtime", get(ui_runtime_api::api_runtime))
+        .route("/api/runners", get(ui_runtime_api::api_runners))
+        .route("/api/runners/:id", get(ui_runtime_api::api_runner_get))
+        .route("/api/sessions", get(ui_runtime_api::api_sessions))
+        .route(
+            "/api/sessions/telegram/resolve",
+            post(ui_runtime_api::api_session_telegram_resolve),
+        )
+        .route(
+            "/api/sessions/:id/runner-session-key",
+            post(ui_runtime_api::api_session_runner_key_set),
+        )
+        .route("/api/sessions/:id", get(ui_runtime_api::api_session_get))
         .route("/api/update/check", get(api_update_check))
         .route("/api/update/apply", post(api_update_apply))
         .route("/api/config", get(ui_runtime_api::api_config_get))
@@ -153,8 +170,20 @@ pub fn build_router(state: WebState) -> Router {
         .route("/api/run/script", post(api_run_script))
         .route("/api/run/command", post(api_run_command))
         .route(
+            "/api/runners/:id/tool/preflight",
+            post(ui_runner_tool_preflight_common::api_runner_tool_preflight),
+        )
+        .route(
             "/api/openclaw/tool/preflight",
             post(ui_openclaw_tool_preflight::api_openclaw_tool_preflight),
+        )
+        .route(
+            "/api/claudecode/tool/preflight",
+            post(ui_claudecode_tool_preflight::api_claudecode_tool_preflight),
+        )
+        .route(
+            "/api/opencode/tool/preflight",
+            post(ui_opencode_tool_preflight::api_opencode_tool_preflight),
         )
         .with_state(state)
 }
@@ -335,6 +364,12 @@ fn ensure_help_docs_bundle_current(ruler_root: &Path) -> Result<()> {
         return Ok(());
     }
 
+    if !npm_available() {
+        return Err(anyhow!(
+            "help docs bundle is missing or stale and requires npm to rebuild; install Node.js + npm and run `npm --prefix docs-site run docs:build`"
+        ));
+    }
+
     eprintln!("docs: rebuilding help bundle from markdown sources...");
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     build_help_docs_bundle(&manifest_dir)
@@ -420,17 +455,46 @@ fn build_help_docs_bundle(manifest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn api_approvals(State(state): State<WebState>) -> impl IntoResponse {
+fn npm_available() -> bool {
+    Command::new("npm")
+        .arg("--version")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn normalize_runner_filter(value: Option<&str>) -> Option<String> {
+    let trimmed = value.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+async fn api_approvals(
+    State(state): State<WebState>,
+    Query(query): Query<ApprovalQuery>,
+) -> impl IntoResponse {
     let runtime = match load_runtime_from_state(&state) {
         Ok(runtime) => runtime,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
     let approvals = ApprovalStore::new(&runtime.config.approvals_file);
+    let runner_filter = normalize_runner_filter(query.runner.as_deref());
     let data = approvals
         .list_pending()
         .unwrap_or_default()
         .into_iter()
+        .filter(|approval| match runner_filter.as_deref() {
+            Some(filter) => approval
+                .action
+                .metadata
+                .get("runner_id")
+                .map(|value| value.trim().eq_ignore_ascii_case(filter))
+                .unwrap_or(false),
+            None => true,
+        })
         .map(approval_to_view)
         .collect::<Vec<_>>();
     (StatusCode::OK, Json(data)).into_response()
@@ -905,7 +969,7 @@ async fn api_policy_toggles(
 /// The following endpoints are safe for confined agents to call:
 /// - GET /api/status/feed - Redacted approval status feed
 /// - GET /api/approvals/:id/wait - Wait for approval resolution
-/// - POST /api/openclaw/tool/preflight - Preflight evaluation for tool calls
+/// - POST /api/runners/:id/tool/preflight - Preflight evaluation for tool calls
 /// - POST /api/export/request - Request staging of files (may require approval)
 /// - POST /api/export/deliver/request - Request delivery (may require approval)
 /// - POST /api/import/request - Request import into workspace (may require approval)
@@ -970,9 +1034,10 @@ async fn api_capabilities() -> impl IntoResponse {
                 },
                 "tool_preflight": {
                     "method": "POST",
-                    "path": "/api/openclaw/tool/preflight",
+                    "path": "/api/runners/:id/tool/preflight",
                     "description": "Preflight evaluation for tool calls before execution",
                     "params": {
+                        "id": "runner id (openclaw | claudecode | opencode)",
                         "tool": "tool name (write, edit, delete, move, read, exec)",
                         "args": "tool-specific arguments"
                     },
@@ -1018,6 +1083,8 @@ async fn api_capabilities() -> impl IntoResponse {
             "operator_only_endpoints": [
                 "/api/status",
                 "/api/runtime",
+                "/api/runners",
+                "/api/runners/:id",
                 "/api/policy",
                 "/api/policy/profiles",
                 "/api/policy/domain-presets",
@@ -1045,7 +1112,10 @@ async fn api_capabilities() -> impl IntoResponse {
                 "agent_ruler_request_export_stage": "/api/export/request",
                 "agent_ruler_request_delivery": "/api/export/deliver/request",
                 "agent_ruler_request_import": "/api/import/request",
-                "before_tool_call": "/api/openclaw/tool/preflight"
+                "before_tool_call": "/api/runners/:id/tool/preflight",
+                "before_tool_call_openclaw": "/api/openclaw/tool/preflight",
+                "before_tool_call_claudecode": "/api/claudecode/tool/preflight",
+                "before_tool_call_opencode": "/api/opencode/tool/preflight"
             },
 
             // Canonical workflow hints for ambiguous user intents.
@@ -1211,7 +1281,12 @@ async fn api_run_command(
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
-    run_ui_command(runtime, payload.cmd)
+    let prepared = match ui_runner_command_api::prepare_ui_command(&runtime, &payload.cmd) {
+        Ok(value) => value,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+
+    run_ui_command(runtime, prepared)
 }
 
 async fn api_update_check(State(state): State<WebState>) -> impl IntoResponse {

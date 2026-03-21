@@ -13,6 +13,7 @@ use crate::helpers::{
     apply_plan_with_mode, build_delivery_action, build_export_action, build_import_action,
     new_stage_record, resolve_delivery_dst, resolve_import_dst, resolve_import_src,
     resolve_stage_dst, resolve_stage_reference, resolve_workspace_src, sanitize_file_name,
+    workspace_root_for_runner_id,
 };
 use crate::model::{Decision, ReasonCode, Verdict};
 use crate::policy::PolicyEngine;
@@ -53,7 +54,10 @@ pub async fn api_export_preview(
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
-    let src = resolve_workspace_src(&runtime, &payload.src);
+    let src = match resolve_workspace_src(&runtime, &payload.src, payload.runner.as_deref()) {
+        Ok(src) => src,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
     let dst = match resolve_stage_dst(&runtime, payload.dst.as_deref(), &src) {
         Ok(dst) => dst,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
@@ -85,9 +89,16 @@ pub async fn api_export_request(
     let approvals = ApprovalStore::new(&runtime.config.approvals_file);
     let receipts = ReceiptStore::new(&runtime.config.receipts_file);
     let staged_store = StagedExportStore::new(&runtime.config.staged_exports_file);
-    let engine = PolicyEngine::new(runtime.policy.clone(), runtime.config.workspace.clone());
+    let workspace_root = match workspace_root_for_runner_id(&runtime, payload.runner.as_deref()) {
+        Ok(path) => path,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    let engine = PolicyEngine::new(runtime.policy.clone(), workspace_root);
 
-    let src = resolve_workspace_src(&runtime, &payload.src);
+    let src = match resolve_workspace_src(&runtime, &payload.src, payload.runner.as_deref()) {
+        Ok(src) => src,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
     let dst = match resolve_stage_dst(&runtime, payload.dst.as_deref(), &src) {
         Ok(dst) => dst,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
@@ -290,7 +301,11 @@ pub async fn api_deliver_request(
     let approvals = ApprovalStore::new(&runtime.config.approvals_file);
     let receipts = ReceiptStore::new(&runtime.config.receipts_file);
     let staged_store = StagedExportStore::new(&runtime.config.staged_exports_file);
-    let engine = PolicyEngine::new(runtime.policy.clone(), runtime.config.workspace.clone());
+    let workspace_root = match workspace_root_for_runner_id(&runtime, payload.runner.as_deref()) {
+        Ok(path) => path,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    let engine = PolicyEngine::new(runtime.policy.clone(), workspace_root);
 
     let (stage_id, staged_src) =
         match resolve_stage_reference(&runtime, &staged_store, &payload.stage_ref) {
@@ -465,7 +480,12 @@ pub async fn api_import_preview(
     };
 
     let src = resolve_import_src(&runtime, &payload.src);
-    let dst = match resolve_import_dst(&runtime, payload.dst.as_deref(), &src) {
+    let dst = match resolve_import_dst(
+        &runtime,
+        payload.dst.as_deref(),
+        &src,
+        payload.runner.as_deref(),
+    ) {
         Ok(dst) => dst,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
@@ -570,10 +590,19 @@ pub async fn api_import_request(
 
     let approvals = ApprovalStore::new(&runtime.config.approvals_file);
     let receipts = ReceiptStore::new(&runtime.config.receipts_file);
-    let engine = PolicyEngine::new(runtime.policy.clone(), runtime.config.workspace.clone());
+    let workspace_root = match workspace_root_for_runner_id(&runtime, payload.runner.as_deref()) {
+        Ok(path) => path,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    let engine = PolicyEngine::new(runtime.policy.clone(), workspace_root);
 
     let src = resolve_import_src(&runtime, &payload.src);
-    let dst = match resolve_import_dst(&runtime, payload.dst.as_deref(), &src) {
+    let dst = match resolve_import_dst(
+        &runtime,
+        payload.dst.as_deref(),
+        &src,
+        payload.runner.as_deref(),
+    ) {
         Ok(dst) => dst,
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };

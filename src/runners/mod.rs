@@ -13,12 +13,17 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{save_config, AppConfig, RuntimeState, CONFIG_FILE_NAME};
+use crate::helpers::runners::openclaw::setup_config::runner_api_base_url;
 use crate::utils::resolve_command_path;
 
+pub mod claudecode;
 pub mod openclaw;
+pub mod opencode;
 
 /// Runtime-local container for all runner-managed artifacts.
 pub const RUNTIME_USER_DATA_DIR_NAME: &str = "user_data";
+/// Runtime-local parent for generic runner-managed state.
+pub const RUNTIME_RUNNERS_DIR_NAME: &str = "runners";
 /// Default managed OpenClaw home directory name under `user_data`.
 pub const OPENCLAW_HOME_DIR_NAME: &str = "openclaw_home";
 /// Default managed workspace directory name under `user_data`.
@@ -29,13 +34,36 @@ pub const OPENCLAW_WORKSPACE_DIR_NAME: &str = "openclaw_workspace";
 #[serde(rename_all = "snake_case")]
 pub enum RunnerKind {
     Openclaw,
+    Claudecode,
+    Opencode,
 }
 
 impl RunnerKind {
+    /// Stable identifier used in config, API filters, and UI labels.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Openclaw => "openclaw",
+            Self::Claudecode => "claudecode",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    /// Parse stable runner identifier.
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openclaw" => Some(Self::Openclaw),
+            "claudecode" => Some(Self::Claudecode),
+            "opencode" => Some(Self::Opencode),
+            _ => None,
+        }
+    }
+
     /// Human-friendly name for CLI/UI messages.
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Openclaw => "OpenClaw",
+            Self::Claudecode => "Claude Code",
+            Self::Opencode => "OpenCode",
         }
     }
 
@@ -43,6 +71,8 @@ impl RunnerKind {
     pub fn executable_name(self) -> &'static str {
         match self {
             Self::Openclaw => "openclaw",
+            Self::Claudecode => "claude",
+            Self::Opencode => "opencode",
         }
     }
 }
@@ -185,7 +215,24 @@ pub fn configured_runner_targets_command(runtime: &RuntimeState, cmd: &[String])
     let Some(association) = runtime.config.runner.as_ref() else {
         return false;
     };
-    command_targets_runner_kind(cmd, association.kind)
+    command_runner_kind(cmd) == Some(association.kind)
+}
+
+/// Resolve runner kind from command token (supports `env KEY=... <runner> ...`).
+pub fn command_runner_kind(cmd: &[String]) -> Option<RunnerKind> {
+    let command_token = command_token(cmd)?;
+    let path = Path::new(command_token);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command_token);
+    [
+        RunnerKind::Openclaw,
+        RunnerKind::Claudecode,
+        RunnerKind::Opencode,
+    ]
+    .into_iter()
+    .find(|kind| name == kind.executable_name())
 }
 
 /// Wrap command with runner-specific environment overrides when needed.
@@ -196,22 +243,45 @@ pub fn apply_runner_env_overrides(runtime: &RuntimeState, cmd: &[String]) -> Vec
     let Some(association) = runtime.config.runner.as_ref() else {
         return cmd.to_vec();
     };
-    if association.kind != RunnerKind::Openclaw {
-        return cmd.to_vec();
-    }
     if !command_targets_runner_kind(cmd, association.kind) {
         return cmd.to_vec();
     }
 
-    let sanitized = strip_env_assignment(cmd, "OPENCLAW_HOME");
-    let mut wrapped = Vec::with_capacity(sanitized.len() + 2);
+    let overrides = runner_env_overrides(
+        association.kind,
+        &association.managed_home,
+        &runtime.config.ui_bind,
+        runtime.config.approval_wait_timeout_secs,
+    );
+    if overrides.is_empty() {
+        return cmd.to_vec();
+    }
+
+    let mut sanitized = cmd.to_vec();
+    for (key, _) in &overrides {
+        sanitized = strip_env_assignment(&sanitized, key);
+    }
+
+    let mut wrapped = Vec::with_capacity(sanitized.len() + overrides.len() + 1);
     wrapped.push("env".to_string());
-    wrapped.push(format!(
-        "OPENCLAW_HOME={}",
-        association.managed_home.display()
-    ));
+    for (key, value) in overrides {
+        wrapped.push(format!("{key}={value}"));
+    }
     wrapped.extend(sanitized);
     wrapped
+}
+
+/// Resolve the effective Zone 0 workspace for a command-targeted runner.
+///
+/// This keeps runner execution cwd aligned with the workspace roots used by
+/// runner-aware UI and transfer APIs. If no configured runner matches the
+/// command, fall back to the default runtime workspace.
+pub fn workspace_root_for_command(runtime: &RuntimeState, cmd: &[String]) -> PathBuf {
+    let Some(kind) = command_runner_kind(cmd) else {
+        return runtime.config.workspace.clone();
+    };
+
+    crate::helpers::workspace_root_for_runner(runtime, Some(kind))
 }
 
 pub fn reconcile_runner_executable(
@@ -370,7 +440,7 @@ fn apply_missing_decision(
             persist_runtime_config(&runtime.config)?;
             print_line(
                 options.emit_to_stderr,
-                "runner data cleanup complete for {} (host OpenClaw home/workspace untouched)",
+                "runner data cleanup complete for {} (host runner state remains untouched)",
                 &[association.kind.display_name()],
             );
             Ok(RunnerAvailabilityState::Removed)
@@ -422,7 +492,7 @@ fn prompt_missing_runner_decision(
     );
     print_line(
         options.emit_to_stderr,
-        "Host OpenClaw home/workspace is never modified by these choices.",
+        "Host runner state is never modified by these choices.",
         &[],
     );
 
@@ -448,15 +518,7 @@ fn read_line(prompt: &str) -> Result<String> {
 }
 
 fn command_targets_runner_kind(cmd: &[String], kind: RunnerKind) -> bool {
-    let Some(command_token) = command_token(cmd) else {
-        return false;
-    };
-    let path = Path::new(command_token);
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(command_token);
-    name == kind.executable_name()
+    command_runner_kind(cmd) == Some(kind)
 }
 
 fn command_token(cmd: &[String]) -> Option<&str> {
@@ -519,8 +581,8 @@ fn print_keep_data_message(kind: RunnerKind, command_name: &str, emit_to_stderr:
     );
     print_line(
         emit_to_stderr,
-        "resolve with `agent-ruler setup` or `agent-ruler runner remove openclaw`",
-        &[],
+        "resolve with `agent-ruler setup` or `agent-ruler runner remove {}`",
+        &[kind.id()],
     );
 }
 
@@ -532,9 +594,63 @@ fn print_rerun_setup_message(kind: RunnerKind, command_name: &str, emit_to_stder
     );
     print_line(
         emit_to_stderr,
-        "or remove managed data with `agent-ruler runner remove openclaw`",
-        &[],
+        "or remove managed data with `agent-ruler runner remove {}`",
+        &[kind.id()],
     );
+}
+
+fn runner_env_overrides(
+    kind: RunnerKind,
+    managed_home: &Path,
+    ui_bind: &str,
+    approval_wait_timeout_secs: u64,
+) -> Vec<(&'static str, String)> {
+    let home = managed_home.to_string_lossy().to_string();
+    let base_url = runner_api_base_url(ui_bind);
+    let approval_wait = approval_wait_timeout_secs.clamp(1, 300).to_string();
+    match kind {
+        RunnerKind::Openclaw => vec![("OPENCLAW_HOME", home)],
+        RunnerKind::Claudecode => vec![
+            ("CLAUDE_CONFIG_DIR", home.clone()),
+            ("HOME", home),
+            ("AGENT_RULER_BASE_URL", base_url),
+            (
+                "AGENT_RULER_RUNNER_ID",
+                RunnerKind::Claudecode.id().to_string(),
+            ),
+            ("AGENT_RULER_AUTO_WAIT_FOR_APPROVALS", "1".to_string()),
+            (
+                "AGENT_RULER_APPROVAL_WAIT_TIMEOUT_SECS",
+                approval_wait.clone(),
+            ),
+        ],
+        RunnerKind::Opencode => vec![
+            ("HOME", home.clone()),
+            (
+                "XDG_CONFIG_HOME",
+                managed_home.join(".config").display().to_string(),
+            ),
+            (
+                "XDG_DATA_HOME",
+                managed_home.join(".local/share").display().to_string(),
+            ),
+            (
+                "XDG_STATE_HOME",
+                managed_home.join(".local/state").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                managed_home.join(".cache").display().to_string(),
+            ),
+            ("AGENT_RULER_BASE_URL", base_url),
+            (
+                "AGENT_RULER_RUNNER_ID",
+                RunnerKind::Opencode.id().to_string(),
+            ),
+            ("AGENT_RULER_AUTO_WAIT_FOR_APPROVALS", "1".to_string()),
+            ("AGENT_RULER_APPROVAL_WAIT_TIMEOUT_SECS", approval_wait),
+        ],
+    }
 }
 
 fn remove_managed_runner_paths(runtime_root: &Path, runner: &RunnerAssociation) -> Result<()> {
@@ -611,9 +727,10 @@ mod tests {
     use crate::config::{init_layout, load_runtime};
 
     use super::{
-        reconcile_runner_executable_with, remove_configured_runner, RunnerAssociation,
-        RunnerAvailabilityState, RunnerCheckOptions, RunnerKind, RunnerMissingDecision,
-        RunnerMissingState,
+        apply_runner_env_overrides, command_runner_kind, reconcile_runner_executable_with,
+        remove_configured_runner, runner_api_base_url, workspace_root_for_command,
+        RunnerAssociation, RunnerAvailabilityState, RunnerCheckOptions, RunnerKind,
+        RunnerMissingDecision, RunnerMissingState,
     };
 
     #[test]
@@ -788,5 +905,185 @@ mod tests {
             runtime.config.runner.is_none(),
             "runner association should be cleared"
         );
+    }
+
+    #[test]
+    fn apply_runner_env_overrides_enforces_claudecode_managed_home() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let managed_home = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/claudecode/home");
+        let managed_workspace = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/claudecode/workspace");
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Claudecode,
+            managed_home: managed_home.clone(),
+            managed_workspace,
+            integrations: Vec::new(),
+            missing: RunnerMissingState::default(),
+        });
+
+        let cmd = vec![
+            "env".to_string(),
+            "CLAUDE_CONFIG_DIR=/tmp/host-claude".to_string(),
+            "HOME=/tmp/host-home".to_string(),
+            "claude".to_string(),
+            "-p".to_string(),
+            "hello".to_string(),
+        ];
+        let wrapped = apply_runner_env_overrides(&runtime, &cmd);
+        let joined = wrapped.join(" ");
+        let managed_home_text = managed_home.to_string_lossy().to_string();
+        let expected_base_url = runner_api_base_url(&runtime.config.ui_bind);
+
+        assert!(joined.contains(&format!("CLAUDE_CONFIG_DIR={managed_home_text}")));
+        assert!(joined.contains(&format!("HOME={managed_home_text}")));
+        assert!(joined.contains(&format!("AGENT_RULER_BASE_URL={expected_base_url}")));
+        assert!(joined.contains("AGENT_RULER_APPROVAL_WAIT_TIMEOUT_SECS="));
+        assert!(
+            !joined.contains("CLAUDE_CONFIG_DIR=/tmp/host-claude"),
+            "host override should be stripped"
+        );
+        assert!(
+            !joined.contains("HOME=/tmp/host-home"),
+            "host override should be stripped"
+        );
+    }
+
+    #[test]
+    fn apply_runner_env_overrides_enforces_opencode_managed_home_and_xdg() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let managed_home = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/opencode/home");
+        let managed_workspace = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/opencode/workspace");
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Opencode,
+            managed_home: managed_home.clone(),
+            managed_workspace,
+            integrations: Vec::new(),
+            missing: RunnerMissingState::default(),
+        });
+
+        let cmd = vec![
+            "env".to_string(),
+            "HOME=/tmp/host-home".to_string(),
+            "XDG_CONFIG_HOME=/tmp/host-config".to_string(),
+            "XDG_DATA_HOME=/tmp/host-data".to_string(),
+            "XDG_STATE_HOME=/tmp/host-state".to_string(),
+            "XDG_CACHE_HOME=/tmp/host-cache".to_string(),
+            "opencode".to_string(),
+            "run".to_string(),
+            "hello".to_string(),
+        ];
+        let wrapped = apply_runner_env_overrides(&runtime, &cmd);
+        let joined = wrapped.join(" ");
+        let managed_home_text = managed_home.to_string_lossy().to_string();
+        let expected_xdg = managed_home.join(".config").to_string_lossy().to_string();
+        let expected_data = managed_home
+            .join(".local/share")
+            .to_string_lossy()
+            .to_string();
+        let expected_state = managed_home
+            .join(".local/state")
+            .to_string_lossy()
+            .to_string();
+        let expected_cache = managed_home.join(".cache").to_string_lossy().to_string();
+        let expected_base_url = runner_api_base_url(&runtime.config.ui_bind);
+
+        assert!(joined.contains(&format!("HOME={managed_home_text}")));
+        assert!(joined.contains(&format!("XDG_CONFIG_HOME={expected_xdg}")));
+        assert!(joined.contains(&format!("XDG_DATA_HOME={expected_data}")));
+        assert!(joined.contains(&format!("XDG_STATE_HOME={expected_state}")));
+        assert!(joined.contains(&format!("XDG_CACHE_HOME={expected_cache}")));
+        assert!(joined.contains(&format!("AGENT_RULER_BASE_URL={expected_base_url}")));
+        assert!(joined.contains("AGENT_RULER_APPROVAL_WAIT_TIMEOUT_SECS="));
+        assert!(
+            !joined.contains("HOME=/tmp/host-home"),
+            "host HOME override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_CONFIG_HOME=/tmp/host-config"),
+            "host XDG config override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_DATA_HOME=/tmp/host-data"),
+            "host XDG data override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_STATE_HOME=/tmp/host-state"),
+            "host XDG state override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_CACHE_HOME=/tmp/host-cache"),
+            "host XDG cache override should be stripped"
+        );
+    }
+
+    #[test]
+    fn workspace_root_for_command_uses_managed_workspace_for_claudecode() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let managed_home = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/claudecode/home");
+        let managed_workspace = runtime
+            .config
+            .runtime_root
+            .join("user_data/runners/claudecode/workspace");
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Claudecode,
+            managed_home,
+            managed_workspace: managed_workspace.clone(),
+            integrations: Vec::new(),
+            missing: RunnerMissingState::default(),
+        });
+
+        let cmd = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "reply with exactly ok".to_string(),
+        ];
+        assert_eq!(
+            workspace_root_for_command(&runtime, &cmd),
+            managed_workspace
+        );
+    }
+
+    #[test]
+    fn command_runner_kind_detects_env_prefixed_commands() {
+        let env_prefixed = vec![
+            "env".to_string(),
+            "FOO=bar".to_string(),
+            "claude".to_string(),
+            "-p".to_string(),
+            "hello".to_string(),
+        ];
+        assert_eq!(
+            command_runner_kind(&env_prefixed),
+            Some(RunnerKind::Claudecode)
+        );
+
+        let unknown = vec!["bash".to_string(), "-lc".to_string(), "echo ok".to_string()];
+        assert_eq!(command_runner_kind(&unknown), None);
     }
 }

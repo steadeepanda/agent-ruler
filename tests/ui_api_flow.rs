@@ -7,9 +7,17 @@ use std::fs;
 use std::path::PathBuf;
 
 use agent_ruler::approvals::ApprovalStore;
-use agent_ruler::config::{init_layout, load_runtime, RuntimeState};
+use agent_ruler::config::{init_layout, load_runtime, save_config, RuntimeState, CONFIG_FILE_NAME};
+use agent_ruler::helpers::workspace_root_for_runner_id;
 use agent_ruler::model::{
-    ActionKind, ActionRequest, Decision, ProcessContext, ReasonCode, Verdict,
+    ActionKind, ActionRequest, Decision, ProcessContext, ReasonCode, Receipt, Verdict,
+};
+use agent_ruler::policy::PolicyEngine;
+use agent_ruler::receipts::ReceiptStore;
+use agent_ruler::runner::run_confined;
+use agent_ruler::runners::{RunnerAssociation, RunnerKind, RunnerMissingState};
+use agent_ruler::sessions::{
+    SessionChannel, SessionListQuery, SessionRecord, SessionStatus, SessionStore,
 };
 use agent_ruler::ui::{build_router, WebState};
 use axum::body::{to_bytes, Body};
@@ -48,6 +56,53 @@ impl UiHarness {
     fn runtime_state(&self) -> RuntimeState {
         load_runtime(self.project.path(), Some(self.runtime.path())).expect("load runtime")
     }
+}
+
+fn persist_runner_association(
+    runtime: &RuntimeState,
+    kind: RunnerKind,
+    managed_workspace: PathBuf,
+) {
+    let managed_home = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join(kind.id())
+        .join("home");
+    fs::create_dir_all(&managed_home).expect("create managed home");
+    fs::create_dir_all(&managed_workspace).expect("create managed workspace");
+
+    let mut updated = runtime.clone();
+    updated.config.runner = Some(RunnerAssociation {
+        kind,
+        managed_home,
+        managed_workspace,
+        integrations: Vec::new(),
+        missing: RunnerMissingState::default(),
+    });
+    save_config(
+        &updated.config.state_dir.join(CONFIG_FILE_NAME),
+        &updated.config,
+    )
+    .expect("save updated runtime config");
+}
+
+fn write_runner_shim(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    fs::create_dir_all(dir).expect("create shim dir");
+    let path = dir.join(name);
+    let script = format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n");
+    fs::write(&path, script).expect("write runner shim");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+    }
+
+    path
 }
 
 async fn call_json(
@@ -124,6 +179,38 @@ fn make_pending_action(label: &str, path: PathBuf) -> ActionRequest {
     }
 }
 
+fn make_pending_action_with_runner(label: &str, path: PathBuf, runner_id: &str) -> ActionRequest {
+    let mut action = make_pending_action(label, path);
+    action
+        .metadata
+        .insert("runner_id".to_string(), runner_id.to_string());
+    action
+}
+
+fn make_receipt_with_runner(id: &str, runner_id: &str) -> Receipt {
+    let mut action = make_pending_action(id, PathBuf::from(format!("/tmp/{id}.txt")));
+    action
+        .metadata
+        .insert("runner_id".to_string(), runner_id.to_string());
+
+    Receipt {
+        id: format!("receipt-{id}"),
+        timestamp: Utc::now(),
+        action,
+        decision: Decision {
+            verdict: Verdict::Allow,
+            reason: ReasonCode::AllowedByPolicy,
+            detail: format!("receipt {id}"),
+            approval_ttl_seconds: None,
+        },
+        zone: None,
+        policy_version: "1".to_string(),
+        policy_hash: "test-hash".to_string(),
+        diff_summary: None,
+        confinement: "test".to_string(),
+    }
+}
+
 fn approval_decision() -> Decision {
     Decision {
         verdict: Verdict::RequireApproval,
@@ -152,6 +239,7 @@ async fn index_page_contains_primary_navigation_sections() {
     assert!(body.contains("Approvals"));
     assert!(body.contains("Import / Export"));
     assert!(body.contains("Timeline")); // Updated for new UI design
+    assert!(body.contains("Runners"));
     assert!(body.contains("Documentation")); // Updated for new UI design
 }
 
@@ -176,6 +264,28 @@ async fn ui_receipts_filter_does_not_default_to_today() {
     assert_eq!(status, StatusCode::OK);
     assert!(js.contains("date: ''"));
     assert!(js.contains("state.receipts.filters.date = '';"));
+}
+
+#[tokio::test]
+async fn ui_global_runtime_path_toggle_wiring_is_present() {
+    let harness = UiHarness::new("ui-global-runtime-path-toggle");
+    let (status, js) = call_text(&harness.app, Method::GET, "/assets/ui.js").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(js.contains("settings-runtime-path-labels"));
+    assert!(js.contains("setRuntimeAliasVisibility("));
+    assert!(
+        !js.contains("filter-runtime-aliases"),
+        "timeline-local runtime alias toggle should not exist"
+    );
+    assert!(
+        js.contains("workspacePathEl.textContent = aliasRuntimePath"),
+        "files page should render path hints through runtime alias helper"
+    );
+    assert!(
+        js.contains("Zone 0 (workspace): <span class=\"mono\">${esc(aliasRuntimePath("),
+        "runners page zone visibility should render through runtime alias helper"
+    );
 }
 
 #[tokio::test]
@@ -428,6 +538,513 @@ async fn status_runtime_and_policy_toggles_work() {
         .unwrap_or(&Vec::new())
         .iter()
         .any(|item| item == "mitmproxy"));
+}
+
+#[tokio::test]
+async fn runners_introspection_endpoints_return_stable_shapes() {
+    let harness = UiHarness::new("ui-runners-introspection");
+
+    let (list_status, list_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners", None).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let items = list_payload["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 3, "expected openclaw, claudecode, opencode");
+
+    let ids: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    assert!(ids.contains("openclaw"));
+    assert!(ids.contains("claudecode"));
+    assert!(ids.contains("opencode"));
+
+    let (item_status, item_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners/openclaw", None).await;
+    assert_eq!(item_status, StatusCode::OK);
+    assert_eq!(item_payload["id"], "openclaw");
+    assert!(item_payload["binary"].is_object());
+    assert!(item_payload["health"].is_object());
+    assert!(item_payload["mode"].is_object());
+    assert!(item_payload["capabilities"].is_array());
+    assert!(item_payload["warnings"].is_array());
+    assert!(item_payload["config"].is_object());
+
+    let (claude_status, claude_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners/claudecode", None).await;
+    assert_eq!(claude_status, StatusCode::OK);
+    assert_eq!(claude_payload["id"], "claudecode");
+    assert_eq!(claude_payload["label"], "Claude Code");
+    assert!(claude_payload["mode"]["supported"].is_array());
+    assert!(claude_payload["config"]["masked"].is_object());
+
+    let (opencode_status, opencode_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners/opencode", None).await;
+    assert_eq!(opencode_status, StatusCode::OK);
+    assert_eq!(opencode_payload["id"], "opencode");
+    assert_eq!(opencode_payload["label"], "OpenCode");
+    assert!(opencode_payload["mode"]["supported"].is_array());
+    assert!(opencode_payload["config"]["masked"].is_object());
+
+    let (missing_status, missing_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/runners/unknown-runner",
+        None,
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert!(missing_payload["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not found"));
+}
+
+#[tokio::test]
+async fn runners_introspection_cache_and_force_flags_work() {
+    let harness = UiHarness::new("ui-runners-cache");
+
+    let (first_status, first_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners", None).await;
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(
+        first_payload["cached"].as_bool(),
+        Some(false),
+        "first read should materialize fresh metadata"
+    );
+    assert!(first_payload["items"].is_array());
+
+    let (second_status, second_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners", None).await;
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(
+        second_payload["cached"].as_bool(),
+        Some(true),
+        "repeat read should serve from cache"
+    );
+
+    let (force_status, force_payload) =
+        call_json(&harness.app, Method::GET, "/api/runners?force=true", None).await;
+    assert_eq!(force_status, StatusCode::OK);
+    assert_eq!(
+        force_payload["cached"].as_bool(),
+        Some(false),
+        "force refresh should bypass cache"
+    );
+}
+
+#[tokio::test]
+async fn sessions_api_filters_paginates_and_returns_detail() {
+    let harness = UiHarness::new("ui-sessions-api");
+    let runtime = harness.runtime_state();
+    let sessions_path = SessionStore::default_path(&runtime.config.state_dir);
+    let now = Utc::now();
+    let seeded = vec![
+        SessionRecord {
+            id: "session-claude-telegram-a".to_string(),
+            runner_kind: RunnerKind::Claudecode,
+            created_at: now,
+            last_active_at: now,
+            status: SessionStatus::Active,
+            title: Some("Claude Telegram A".to_string()),
+            label: None,
+            runner_session_key: Some("claude-a".to_string()),
+            channels: vec![SessionChannel::Telegram],
+            telegram_chat_id: Some("-1001".to_string()),
+            telegram_thread_id: Some(10),
+            telegram_message_anchor_id: Some(100),
+        },
+        SessionRecord {
+            id: "session-claude-telegram-b".to_string(),
+            runner_kind: RunnerKind::Claudecode,
+            created_at: now - chrono::Duration::minutes(5),
+            last_active_at: now - chrono::Duration::minutes(5),
+            status: SessionStatus::Active,
+            title: Some("Claude Telegram B".to_string()),
+            label: None,
+            runner_session_key: Some("claude-b".to_string()),
+            channels: vec![SessionChannel::Telegram],
+            telegram_chat_id: Some("-1001".to_string()),
+            telegram_thread_id: Some(11),
+            telegram_message_anchor_id: Some(101),
+        },
+        SessionRecord {
+            id: "session-opencode-tui".to_string(),
+            runner_kind: RunnerKind::Opencode,
+            created_at: now - chrono::Duration::days(10),
+            last_active_at: now - chrono::Duration::days(10),
+            status: SessionStatus::Archived,
+            title: None,
+            label: Some("Agent main".to_string()),
+            runner_session_key: Some("opencode-z".to_string()),
+            channels: vec![SessionChannel::Tui],
+            telegram_chat_id: None,
+            telegram_thread_id: None,
+            telegram_message_anchor_id: None,
+        },
+    ];
+    fs::write(
+        &sessions_path,
+        serde_json::to_string_pretty(&seeded).expect("serialize sessions fixtures"),
+    )
+    .expect("write sessions fixtures");
+
+    let (page_status, page_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/sessions?runner=claudecode&channel=telegram&status=active&activity=recent&limit=1&cursor=0&q=Claude",
+        None,
+    )
+    .await;
+    assert_eq!(page_status, StatusCode::OK);
+    assert_eq!(page_payload["total"], 2);
+    assert_eq!(page_payload["items"].as_array().map(|v| v.len()), Some(1));
+    assert_eq!(page_payload["has_more"], true);
+    assert_eq!(page_payload["next_cursor"], "1");
+    assert_eq!(page_payload["items"][0]["runner_label"], "Claude Code");
+    assert_eq!(page_payload["items"][0]["channels"][0], "telegram");
+
+    let detail_id = page_payload["items"][0]["id"]
+        .as_str()
+        .expect("session id in first page");
+    let (detail_status, detail_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        &format!("/api/sessions/{detail_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(detail_status, StatusCode::OK);
+    assert_eq!(detail_payload["id"], detail_id);
+    assert_eq!(detail_payload["telegram_thread_id"], 10);
+
+    let store = SessionStore::new(sessions_path);
+    let direct_page = store
+        .page(&SessionListQuery::default())
+        .expect("list sessions directly");
+    assert_eq!(direct_page.total, 3);
+}
+
+#[tokio::test]
+async fn telegram_session_resolve_endpoint_creates_reuses_and_blocks_runner_switch() {
+    let harness = UiHarness::new("ui-telegram-session-resolve");
+
+    let (create_status, create_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/sessions/telegram/resolve",
+        Some(json!({
+            "runner_kind": "claudecode",
+            "chat_id": "-1004242",
+            "thread_id": 77,
+            "message_anchor_id": 501,
+            "title": "Daily notes"
+        })),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK);
+    assert_eq!(create_payload["created"], true);
+    assert_eq!(create_payload["session"]["runner_kind"], "claudecode");
+    assert_eq!(create_payload["session"]["runner_label"], "Claude Code");
+    assert_eq!(create_payload["session"]["telegram_thread_id"], 77);
+
+    let session_id = create_payload["session"]["id"]
+        .as_str()
+        .expect("created session id")
+        .to_string();
+
+    let (reuse_status, reuse_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/sessions/telegram/resolve",
+        Some(json!({
+            "runner_kind": "claudecode",
+            "chat_id": "-1004242",
+            "thread_id": 77,
+            "message_anchor_id": 999,
+            "title": "Replacement title"
+        })),
+    )
+    .await;
+    assert_eq!(reuse_status, StatusCode::OK);
+    assert_eq!(reuse_payload["created"], false);
+    assert_eq!(reuse_payload["session"]["id"], session_id);
+    assert_eq!(reuse_payload["session"]["telegram_message_anchor_id"], 501);
+
+    let (conflict_status, conflict_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/sessions/telegram/resolve",
+        Some(json!({
+            "runner_kind": "opencode",
+            "chat_id": "-1004242",
+            "thread_id": 77
+        })),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert!(conflict_payload["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("already bound to runner `claudecode`"));
+}
+
+#[tokio::test]
+async fn runtime_and_file_listing_apis_are_runner_aware_for_workspace_zone() {
+    let harness = UiHarness::new("ui-runtime-runner-zones");
+    let runtime = harness.runtime_state();
+
+    let openclaw_workspace = runtime.config.workspace.clone();
+    let opencode_workspace = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join("opencode")
+        .join("workspace");
+    let claudecode_workspace = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join("claudecode")
+        .join("workspace");
+
+    fs::create_dir_all(&openclaw_workspace).expect("create openclaw workspace");
+    fs::create_dir_all(&opencode_workspace).expect("create opencode workspace");
+    fs::create_dir_all(&claudecode_workspace).expect("create claudecode workspace");
+    fs::write(openclaw_workspace.join("openclaw-zone.txt"), "openclaw")
+        .expect("write openclaw marker");
+    fs::write(opencode_workspace.join("opencode-zone.txt"), "opencode")
+        .expect("write opencode marker");
+    fs::write(
+        claudecode_workspace.join("claudecode-zone.txt"),
+        "claudecode",
+    )
+    .expect("write claudecode marker");
+
+    persist_runner_association(&runtime, RunnerKind::Openclaw, openclaw_workspace.clone());
+
+    let (runtime_default_status, runtime_default_payload) =
+        call_json(&harness.app, Method::GET, "/api/runtime", None).await;
+    assert_eq!(runtime_default_status, StatusCode::OK);
+    assert_eq!(
+        runtime_default_payload["selected_runner"],
+        RunnerKind::Openclaw.id()
+    );
+    assert_eq!(
+        runtime_default_payload["workspace"].as_str(),
+        Some(openclaw_workspace.to_string_lossy().as_ref())
+    );
+
+    let (runtime_opencode_status, runtime_opencode_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/runtime?runner=opencode",
+        None,
+    )
+    .await;
+    assert_eq!(runtime_opencode_status, StatusCode::OK);
+    assert_eq!(
+        runtime_opencode_payload["selected_runner"],
+        RunnerKind::Opencode.id()
+    );
+    assert_eq!(
+        runtime_opencode_payload["workspace"].as_str(),
+        Some(opencode_workspace.to_string_lossy().as_ref())
+    );
+
+    let (runtime_claude_status, runtime_claude_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/runtime?runner=claudecode",
+        None,
+    )
+    .await;
+    assert_eq!(runtime_claude_status, StatusCode::OK);
+    assert_eq!(
+        runtime_claude_payload["selected_runner"],
+        RunnerKind::Claudecode.id()
+    );
+    assert_eq!(
+        runtime_claude_payload["workspace"].as_str(),
+        Some(claudecode_workspace.to_string_lossy().as_ref())
+    );
+
+    let (default_files_status, default_files_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/files/list?zone=workspace",
+        None,
+    )
+    .await;
+    assert_eq!(default_files_status, StatusCode::OK);
+    assert!(default_files_payload
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|item| item["path"] == "openclaw-zone.txt"));
+    assert!(!default_files_payload
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|item| item["path"] == "opencode-zone.txt"));
+
+    let (opencode_files_status, opencode_files_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/files/list?zone=workspace&runner=opencode",
+        None,
+    )
+    .await;
+    assert_eq!(opencode_files_status, StatusCode::OK);
+    assert!(opencode_files_payload
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|item| item["path"] == "opencode-zone.txt"));
+    assert!(!opencode_files_payload
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|item| item["path"] == "openclaw-zone.txt"));
+
+    let (claude_files_status, claude_files_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/files/list?zone=workspace&runner=claudecode",
+        None,
+    )
+    .await;
+    assert_eq!(claude_files_status, StatusCode::OK);
+    assert!(claude_files_payload
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|item| item["path"] == "claudecode-zone.txt"));
+
+    let (invalid_runner_status, invalid_runner_payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/files/list?zone=workspace&runner=unknown",
+        None,
+    )
+    .await;
+    assert_eq!(invalid_runner_status, StatusCode::BAD_REQUEST);
+    assert!(invalid_runner_payload["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("runner must be one of"));
+}
+
+#[tokio::test]
+async fn approvals_support_runner_filter() {
+    let harness = UiHarness::new("ui-approvals-runner-filter");
+    let runtime = harness.runtime_state();
+    let approvals = ApprovalStore::new(&runtime.config.approvals_file);
+
+    let _ = approvals
+        .create_pending(
+            &make_pending_action_with_runner(
+                "openclaw",
+                runtime.config.shared_zone_dir.join("openclaw.txt"),
+                "openclaw",
+            ),
+            &approval_decision(),
+            "openclaw approval",
+        )
+        .expect("create openclaw approval");
+    let _ = approvals
+        .create_pending(
+            &make_pending_action_with_runner(
+                "claudecode",
+                runtime.config.shared_zone_dir.join("claudecode.txt"),
+                "claudecode",
+            ),
+            &approval_decision(),
+            "claudecode approval",
+        )
+        .expect("create claudecode approval");
+
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/approvals?runner=claudecode",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = payload.as_array().expect("approvals array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["action"]["metadata"]["runner_id"], "claudecode");
+}
+
+#[tokio::test]
+async fn receipts_support_runner_filter() {
+    let harness = UiHarness::new("ui-receipts-runner-filter");
+    let runtime = harness.runtime_state();
+    let receipts = ReceiptStore::new(&runtime.config.receipts_file);
+
+    receipts
+        .append(&make_receipt_with_runner("openclaw-1", "openclaw"))
+        .expect("append openclaw receipt");
+    receipts
+        .append(&make_receipt_with_runner("opencode-1", "opencode"))
+        .expect("append opencode receipt");
+
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/receipts?runner=opencode&limit=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["total"], 1);
+    assert_eq!(
+        payload["items"][0]["action"]["metadata"]["runner_id"],
+        "opencode"
+    );
+}
+
+#[tokio::test]
+async fn ui_logs_support_runner_filter() {
+    let harness = UiHarness::new("ui-logs-runner-filter");
+
+    let _ = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/ui/logs/event",
+        Some(json!({
+            "level": "info",
+            "source": "runner",
+            "message": "claude event",
+            "details": {"runner_id": "claudecode"}
+        })),
+    )
+    .await;
+    let _ = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/ui/logs/event",
+        Some(json!({
+            "level": "info",
+            "source": "runner",
+            "message": "openclaw event",
+            "details": {"runner_id": "openclaw"}
+        })),
+    )
+    .await;
+
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/ui/logs?runner=claudecode&limit=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["items"][0]["details"]["runner_id"], "claudecode");
 }
 
 #[tokio::test]
@@ -730,6 +1347,25 @@ async fn config_get_includes_generated_openclaw_bridge_settings() {
             .expect("bridge config path"),
     );
     assert!(config_path.exists(), "generated bridge config should exist");
+
+    for key in ["claudecode_bridge", "opencode_bridge"] {
+        assert_eq!(payload[key]["config"]["enabled"], false);
+        assert_eq!(payload[key]["config"]["answer_streaming_enabled"], true);
+        assert_eq!(payload[key]["config"]["poll_interval_seconds"], 8);
+        assert_eq!(payload[key]["config"]["decision_ttl_seconds"], 7200);
+        assert_eq!(payload[key]["config"]["short_id_length"], 6);
+        assert_eq!(payload[key]["config"]["bot_token_configured"], false);
+        assert_eq!(payload[key]["config"]["bot_token_masked"], "");
+        let bridge_path = PathBuf::from(
+            payload[key]["config_path"]
+                .as_str()
+                .expect("runner bridge config path"),
+        );
+        assert!(
+            bridge_path.exists(),
+            "generated runner bridge config should exist for {key}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -794,6 +1430,220 @@ async fn config_update_persists_openclaw_bridge_settings() {
     assert_eq!(parsed["state_file"], "custom-state.json");
     assert_eq!(parsed["openclaw_bin"], "openclaw-custom");
     assert_eq!(parsed["agent_ruler_bin"], "agent-ruler-custom");
+}
+
+#[tokio::test]
+async fn config_update_persists_runner_telegram_bridge_settings_and_masks_token() {
+    let harness = UiHarness::new("ui-config-runner-telegram-bridge-update");
+
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/config/update",
+        Some(json!({
+            "claudecode_bridge": {
+                "enabled": true,
+                "answer_streaming_enabled": false,
+                "poll_interval_seconds": 11,
+                "decision_ttl_seconds": 1900,
+                "short_id_length": 7,
+                "state_file": "claudecode-telegram-state-custom.json",
+                "bot_token": "123456:telegram-secret-token",
+                "chat_ids": ["-1009876543210", "-1001122334455"],
+                "allow_from": ["10001", "10002"]
+            },
+            "opencode_bridge": {
+                "enabled": true,
+                "answer_streaming_enabled": true,
+                "poll_interval_seconds": 12,
+                "decision_ttl_seconds": 2000,
+                "short_id_length": 8,
+                "state_file": "opencode-telegram-state-custom.json",
+                "bot_token": "987654:telegram-secret-token-opencode",
+                "chat_ids": ["-1009988776655"],
+                "allow_from": ["20001"]
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["claudecode_bridge"]["config"]["enabled"], true);
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["answer_streaming_enabled"],
+        false
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["poll_interval_seconds"],
+        11
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["decision_ttl_seconds"],
+        1900
+    );
+    assert_eq!(payload["claudecode_bridge"]["config"]["short_id_length"], 7);
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["state_file"],
+        "claudecode-telegram-state-custom.json"
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["chat_ids"],
+        json!([])
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["allow_from"][0],
+        "10001"
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["bot_token_configured"],
+        true
+    );
+    assert_eq!(
+        payload["claudecode_bridge"]["config"]["bot_token_masked"],
+        "***oken"
+    );
+
+    assert_eq!(payload["opencode_bridge"]["config"]["enabled"], true);
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["answer_streaming_enabled"],
+        true
+    );
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["poll_interval_seconds"],
+        12
+    );
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["decision_ttl_seconds"],
+        2000
+    );
+    assert_eq!(payload["opencode_bridge"]["config"]["short_id_length"], 8);
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["state_file"],
+        "opencode-telegram-state-custom.json"
+    );
+    assert_eq!(payload["opencode_bridge"]["config"]["chat_ids"], json!([]));
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["allow_from"][0],
+        "20001"
+    );
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["bot_token_configured"],
+        true
+    );
+    assert_eq!(
+        payload["opencode_bridge"]["config"]["bot_token_masked"],
+        "***code"
+    );
+
+    let claudecode_path = PathBuf::from(
+        payload["claudecode_bridge"]["config_path"]
+            .as_str()
+            .expect("claudecode bridge config path"),
+    );
+    let claudecode_raw =
+        fs::read_to_string(&claudecode_path).expect("read generated claudecode bridge config");
+    let claudecode_parsed: Value =
+        serde_json::from_str(&claudecode_raw).expect("parse generated claudecode bridge config");
+    assert_eq!(claudecode_parsed["enabled"], true);
+    assert_eq!(claudecode_parsed["answer_streaming_enabled"], false);
+    assert_eq!(claudecode_parsed["poll_interval_seconds"], 11);
+    assert_eq!(claudecode_parsed["decision_ttl_seconds"], 1900);
+    assert_eq!(claudecode_parsed["short_id_length"], 7);
+    assert_eq!(
+        claudecode_parsed["state_file"],
+        "claudecode-telegram-state-custom.json"
+    );
+    assert_eq!(
+        claudecode_parsed["bot_token"],
+        "123456:telegram-secret-token"
+    );
+    assert_eq!(claudecode_parsed["chat_ids"], json!([]));
+
+    let opencode_path = PathBuf::from(
+        payload["opencode_bridge"]["config_path"]
+            .as_str()
+            .expect("opencode bridge config path"),
+    );
+    let opencode_raw =
+        fs::read_to_string(&opencode_path).expect("read generated opencode bridge config");
+    let opencode_parsed: Value =
+        serde_json::from_str(&opencode_raw).expect("parse generated opencode bridge config");
+    assert_eq!(opencode_parsed["enabled"], true);
+    assert_eq!(opencode_parsed["answer_streaming_enabled"], true);
+    assert_eq!(opencode_parsed["poll_interval_seconds"], 12);
+    assert_eq!(opencode_parsed["decision_ttl_seconds"], 2000);
+    assert_eq!(opencode_parsed["short_id_length"], 8);
+    assert_eq!(
+        opencode_parsed["state_file"],
+        "opencode-telegram-state-custom.json"
+    );
+    assert_eq!(
+        opencode_parsed["bot_token"],
+        "987654:telegram-secret-token-opencode"
+    );
+    assert_eq!(opencode_parsed["chat_ids"], json!([]));
+}
+
+#[tokio::test]
+async fn config_update_rejects_invalid_runner_telegram_bot_token() {
+    let harness = UiHarness::new("ui-config-runner-telegram-invalid-token");
+
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/config/update",
+        Some(json!({
+            "claudecode_bridge": {
+                "bot_token": "panda@panda-VMware:~$ agent-ruler run -- claude error: preflight failed"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bot_token must match Telegram format"),
+        "error should surface invalid token guidance"
+    );
+}
+
+#[tokio::test]
+async fn config_update_syncs_selected_runner_bridge_ownership() {
+    let harness = UiHarness::new("ui-config-runner-bridge-ownership-sync");
+    let runtime = harness.runtime_state();
+    let opencode_workspace = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join("opencode")
+        .join("workspace");
+    persist_runner_association(&runtime, RunnerKind::Opencode, opencode_workspace);
+
+    let logs_dir = runtime.config.runtime_root.join("user_data").join("logs");
+    fs::create_dir_all(&logs_dir).expect("create logs dir");
+    let claudecode_pid = logs_dir.join("claudecode-telegram-channel-bridge.pid");
+    let opencode_pid = logs_dir.join("opencode-telegram-channel-bridge.pid");
+    fs::write(&claudecode_pid, "not-a-pid\n").expect("seed stale claudecode pid");
+    fs::write(&opencode_pid, "not-a-pid\n").expect("seed stale opencode pid");
+
+    let (status, _payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/config/update",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !claudecode_pid.exists(),
+        "non-selected runner bridge pid should be cleared"
+    );
+    assert!(
+        !opencode_pid.exists(),
+        "selected runner bridge pid should be reconciled on config sync"
+    );
 }
 
 #[tokio::test]
@@ -970,6 +1820,176 @@ async fn export_stage_and_delivery_flow_work() {
 }
 
 #[tokio::test]
+async fn delivery_request_defaults_to_runtime_user_destination_when_dst_omitted() {
+    let harness = UiHarness::new("ui-delivery-default-dst");
+    let runtime = harness.runtime_state();
+
+    fs::write(
+        runtime.config.shared_zone_dir.join("report.txt"),
+        "release-notes-default-dst\n",
+    )
+    .expect("write shared-zone report");
+
+    let (deliver_code, deliver) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/export/deliver/request",
+        Some(json!({
+            "stage_ref": "report.txt",
+            "auto_approve": true,
+            "auto_approve_origin": "control_panel_user"
+        })),
+    )
+    .await;
+    assert_eq!(deliver_code, StatusCode::OK);
+    assert_eq!(deliver["status"], "delivered");
+
+    let delivery_target = runtime.config.default_delivery_dir.join("report.txt");
+    assert!(
+        delivery_target.exists(),
+        "expected delivery to land in runtime default user destination"
+    );
+    let delivered = fs::read_to_string(&delivery_target).expect("read delivered report");
+    assert!(delivered.contains("release-notes-default-dst"));
+}
+
+#[tokio::test]
+async fn delivery_request_rejects_stage_reference_outside_shared_zone() {
+    let harness = UiHarness::new("ui-delivery-stage-ref-shared-zone-only");
+    let runtime = harness.runtime_state();
+
+    fs::write(
+        runtime.config.workspace.join("outside-shared-zone.txt"),
+        "outside shared zone\n",
+    )
+    .expect("write workspace file");
+
+    let outside_ref = runtime.config.workspace.join("outside-shared-zone.txt");
+    let (deliver_code, deliver_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/export/deliver/request",
+        Some(json!({
+            "stage_ref": outside_ref.to_string_lossy(),
+            "auto_approve": true,
+            "auto_approve_origin": "control_panel_user"
+        })),
+    )
+    .await;
+
+    assert_eq!(deliver_code, StatusCode::BAD_REQUEST);
+    assert!(deliver_payload["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("stage reference must stay within shared zone"));
+}
+
+#[tokio::test]
+async fn claudecode_run_stage_and_deliver_uses_managed_workspace_and_default_destination() {
+    let harness = UiHarness::new("ui-claude-run-stage-deliver");
+    let runtime = harness.runtime_state();
+    let claudecode_workspace = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join("claudecode")
+        .join("workspace");
+    persist_runner_association(
+        &runtime,
+        RunnerKind::Claudecode,
+        claudecode_workspace.clone(),
+    );
+
+    let runtime = harness.runtime_state();
+    let shim = write_runner_shim(
+        &claudecode_workspace,
+        "claude",
+        r#"printf 'This is a simple test file.\nCreated on 2026-03-10.\n' > test.txt"#,
+    );
+    let mut runtime = runtime;
+    runtime.policy.rules.execution.deny_workspace_exec = false;
+    runtime.policy.rules.execution.deny_tmp_exec = false;
+    runtime.policy_hash = runtime.policy.policy_hash().expect("policy hash");
+    let approvals = ApprovalStore::new(&runtime.config.approvals_file);
+    let receipts = ReceiptStore::new(&runtime.config.receipts_file);
+    let workspace_root = workspace_root_for_runner_id(&runtime, Some("claudecode"))
+        .expect("resolve Claude workspace");
+    let engine = PolicyEngine::new(runtime.policy.clone(), workspace_root.clone());
+
+    let run = run_confined(
+        &[
+            shim.to_string_lossy().to_string(),
+            "-p".to_string(),
+            "create test file".to_string(),
+        ],
+        &runtime,
+        &engine,
+        &approvals,
+        &receipts,
+    );
+    let run = match run {
+        Ok(value) => value,
+        Err(err) => {
+            if is_confinement_env_error(&err.to_string()) {
+                eprintln!("skipping claude stage+deliver runner assertion due host limits: {err}");
+                return;
+            }
+            panic!("run claude shim: {err}");
+        }
+    };
+    assert_eq!(run.exit_code, 0);
+
+    let managed_file = claudecode_workspace.join("test.txt");
+    assert!(
+        managed_file.exists(),
+        "expected Claude runner file in managed workspace"
+    );
+    assert!(
+        !runtime.config.workspace.join("test.txt").exists(),
+        "runner should not write into the default runtime workspace"
+    );
+
+    let (stage_code, stage_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/export/request",
+        Some(json!({
+            "src": "test.txt",
+            "runner": "claudecode",
+            "auto_approve": true,
+            "auto_approve_origin": "control_panel_user"
+        })),
+    )
+    .await;
+    assert_eq!(stage_code, StatusCode::OK);
+    assert_eq!(stage_payload["status"], "staged");
+
+    let (deliver_code, deliver_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/export/deliver/request",
+        Some(json!({
+            "stage_ref": "test.txt",
+            "runner": "claudecode",
+            "auto_approve": true,
+            "auto_approve_origin": "control_panel_user"
+        })),
+    )
+    .await;
+    assert_eq!(deliver_code, StatusCode::OK);
+    assert_eq!(deliver_payload["status"], "delivered");
+
+    let delivery_target = runtime.config.default_delivery_dir.join("test.txt");
+    assert!(
+        delivery_target.exists(),
+        "expected delivered file in runtime default destination"
+    );
+    let delivered = fs::read_to_string(&delivery_target).expect("read delivered file");
+    assert!(delivered.contains("This is a simple test file."));
+}
+
+#[tokio::test]
 async fn export_stage_rejects_destination_outside_shared_zone() {
     let harness = UiHarness::new("ui-export-stage-shared-zone-only");
     let runtime = harness.runtime_state();
@@ -1137,7 +2157,7 @@ async fn reset_exec_and_run_script_endpoints_work() {
     );
     assert_eq!(
         detailed_receipts_payload["items"][0]["action"]["process"]["command"],
-        "rm /etc/passwd"
+        "rm"
     );
 
     // Success path may depend on host user-namespace allowances; skip if host rejects bwrap.
@@ -1241,6 +2261,249 @@ async fn openclaw_tool_preflight_endpoint_logs_and_blocks_system_write() {
         receipts_raw.contains("\"reason\":\"allowed_by_policy\""),
         "expected allow reason in receipts"
     );
+}
+
+#[tokio::test]
+async fn runner_tool_preflight_generic_endpoint_supports_claudecode() {
+    let harness = UiHarness::new("ui-runner-tool-preflight-claude");
+    let runtime = harness.runtime_state();
+
+    let (deny_code, deny_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/runners/claudecode/tool/preflight",
+        Some(json!({
+            "tool_name": "write",
+            "params": {
+                "path": "/etc/systemd/system/blocked.service",
+                "content": "x"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-runner-claude"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(deny_code, StatusCode::OK);
+    assert_eq!(deny_payload["status"], "denied");
+    assert_eq!(deny_payload["blocked"], true);
+    assert_eq!(deny_payload["reason"], "deny_system_critical");
+
+    let receipts_raw = fs::read_to_string(runtime.config.receipts_file).expect("read receipts");
+    assert!(
+        receipts_raw.contains("\"operation\":\"claudecode_tool_write\""),
+        "expected claudecode write preflight operation in receipts"
+    );
+    assert!(
+        receipts_raw.contains("\"runner_id\":\"claudecode\""),
+        "expected claudecode runner id in preflight receipt"
+    );
+}
+
+#[tokio::test]
+async fn runner_tool_preflight_alias_endpoint_supports_opencode() {
+    let harness = UiHarness::new("ui-runner-tool-preflight-opencode");
+    let runtime = harness.runtime_state();
+
+    let (deny_code, deny_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/opencode/tool/preflight",
+        Some(json!({
+            "tool_name": "write",
+            "params": {
+                "path": "/etc/systemd/system/blocked-opencode.service",
+                "content": "x"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-runner-opencode"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(deny_code, StatusCode::OK);
+    assert_eq!(deny_payload["status"], "denied");
+    assert_eq!(deny_payload["blocked"], true);
+    assert_eq!(deny_payload["reason"], "deny_system_critical");
+
+    let receipts_raw = fs::read_to_string(runtime.config.receipts_file).expect("read receipts");
+    assert!(
+        receipts_raw.contains("\"operation\":\"opencode_tool_write\""),
+        "expected opencode write preflight operation in receipts"
+    );
+    assert!(
+        receipts_raw.contains("\"runner_id\":\"opencode\""),
+        "expected opencode runner id in preflight receipt"
+    );
+}
+
+#[tokio::test]
+async fn runner_tool_preflight_resolves_relative_paths_against_selected_runner_workspace() {
+    let harness = UiHarness::new("ui-runner-tool-preflight-relative-path");
+    let runtime = harness.runtime_state();
+    let opencode_workspace = runtime
+        .config
+        .runtime_root
+        .join("user_data")
+        .join("runners")
+        .join("opencode")
+        .join("workspace");
+    fs::create_dir_all(&opencode_workspace).expect("create opencode workspace");
+    persist_runner_association(&runtime, RunnerKind::Opencode, opencode_workspace.clone());
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/opencode/tool/preflight",
+        Some(json!({
+            "tool_name": "write",
+            "params": {
+                "path": "runner-aware.txt",
+                "content": "x"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-relative-opencode"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "allow");
+    assert_eq!(payload["blocked"], false);
+
+    let receipts_raw = fs::read_to_string(runtime.config.receipts_file).expect("read receipts");
+    assert!(
+        receipts_raw.contains(
+            opencode_workspace
+                .join("runner-aware.txt")
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "expected relative runner tool path to resolve inside opencode managed workspace"
+    );
+    assert!(
+        !receipts_raw.contains(runtime.config.workspace.join("runner-aware.txt").to_string_lossy().as_ref()),
+        "runner tool preflight should not resolve relative opencode paths against the default workspace"
+    );
+}
+
+#[tokio::test]
+async fn runner_tool_preflight_reuses_active_approval_within_runner_session() {
+    let harness = UiHarness::new("ui-runner-tool-preflight-approval-reuse");
+
+    let command_text = "rm -rf /opt/shared/retry-approved.txt";
+    let (pending_code, pending_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/opencode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": command_text
+            },
+            "context": {
+                "agent_id": "agent-a",
+                "session_key": "session-a"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(pending_code, StatusCode::OK);
+    assert_eq!(pending_payload["status"], "pending_approval");
+    assert_eq!(pending_payload["blocked"], true);
+
+    let approval_id = pending_payload["approval_id"]
+        .as_str()
+        .expect("approval id for pending runner preflight");
+    let approve_path = format!("/api/approvals/{approval_id}/approve");
+    let (approve_code, _) = call_json(&harness.app, Method::POST, &approve_path, None).await;
+    assert_eq!(approve_code, StatusCode::OK);
+
+    let (retry_code, retry_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/opencode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": command_text
+            },
+            "context": {
+                "agent_id": "agent-b",
+                "session_key": "session-a"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(retry_code, StatusCode::OK);
+    assert_eq!(retry_payload["status"], "allow");
+    assert_eq!(retry_payload["blocked"], false);
+    assert_eq!(retry_payload["reason"], "allowed_by_policy");
+    assert!(retry_payload["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("active approval scope"));
+}
+
+#[tokio::test]
+async fn runner_tool_preflight_reuses_active_approval_within_runner_session_claudecode() {
+    let harness = UiHarness::new("ui-runner-tool-preflight-approval-reuse-claude");
+
+    let command_text = "rm -rf /opt/shared/retry-approved-claude.txt";
+    let (pending_code, pending_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/claudecode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": command_text
+            },
+            "context": {
+                "agent_id": "agent-a",
+                "session_key": "session-a"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(pending_code, StatusCode::OK);
+    assert_eq!(pending_payload["status"], "pending_approval");
+    assert_eq!(pending_payload["blocked"], true);
+
+    let approval_id = pending_payload["approval_id"]
+        .as_str()
+        .expect("approval id for pending runner preflight");
+    let approve_path = format!("/api/approvals/{approval_id}/approve");
+    let (approve_code, _) = call_json(&harness.app, Method::POST, &approve_path, None).await;
+    assert_eq!(approve_code, StatusCode::OK);
+
+    let (retry_code, retry_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/claudecode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": command_text
+            },
+            "context": {
+                "agent_id": "agent-b",
+                "session_key": "session-a"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(retry_code, StatusCode::OK);
+    assert_eq!(retry_payload["status"], "allow");
+    assert_eq!(retry_payload["blocked"], false);
+    assert_eq!(retry_payload["reason"], "allowed_by_policy");
+    assert!(retry_payload["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("active approval scope"));
 }
 
 #[tokio::test]
@@ -1757,6 +3020,39 @@ async fn files_list_prefix_supports_subtree_and_blocks_parent_traversal() {
 }
 
 #[tokio::test]
+async fn files_list_limit_keeps_top_level_workspace_entries_visible() {
+    let harness = UiHarness::new("ui-files-limit-priority");
+    let runtime = harness.runtime_state();
+
+    fs::write(runtime.config.workspace.join("0-root.md"), "root\n").expect("write root file");
+    fs::create_dir_all(runtime.config.workspace.join("zzz/deep")).expect("create deep dirs");
+    for idx in 0..120usize {
+        fs::write(
+            runtime
+                .config
+                .workspace
+                .join("zzz/deep")
+                .join(format!("nested-{idx:03}.txt")),
+            "payload\n",
+        )
+        .expect("write deep file");
+    }
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::GET,
+        "/api/files/list?zone=workspace&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+
+    let entries = payload.as_array().expect("files list array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], "0-root.md");
+}
+
+#[tokio::test]
 async fn files_list_deep_parent_traversal_rejected() {
     let harness = UiHarness::new("ui-files-prefix");
     let (code, payload) = call_json(
@@ -1860,9 +3156,24 @@ async fn export_request_without_dst_uses_default_stage_filename() {
 
 #[tokio::test]
 async fn help_site_is_served_from_daemon() {
-    let harness = UiHarness::new("ui-help-static");
+    let project = TestRuntimeDir::new("ui-help-static-project");
+    let runtime = TestRuntimeDir::new("ui-help-static-runtime");
+    init_layout(project.path(), Some(runtime.path()), None, true).expect("init runtime layout");
 
-    let (status, body) = call_text(&harness.app, Method::GET, "/help/").await;
+    let runtime_help_dist = project.path().join("docs-site/docs/.vitepress/dist");
+    fs::create_dir_all(&runtime_help_dist).expect("create runtime docs dist");
+    fs::write(
+        runtime_help_dist.join("index.html"),
+        "<html><body>Agent Ruler Documentation</body></html>",
+    )
+    .expect("write runtime docs index");
+
+    let app = build_router(WebState {
+        ruler_root: project.path().to_path_buf(),
+        runtime_dir: Some(runtime.path().to_path_buf()),
+    });
+
+    let (status, body) = call_text(&app, Method::GET, "/help/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Agent Ruler Documentation"));
 }
@@ -1959,6 +3270,11 @@ async fn capabilities_endpoint_returns_safe_contract() {
             "agent_safe_endpoints must contain '{endpoint}'"
         );
     }
+
+    assert_eq!(
+        endpoints["tool_preflight"]["path"],
+        "/api/runners/:id/tool/preflight"
+    );
 
     // Verify each endpoint has required fields
     for (key, endpoint) in endpoints.as_object().unwrap_or(&serde_json::Map::new()) {
@@ -2109,6 +3425,14 @@ async fn capabilities_endpoint_returns_safe_contract() {
     assert!(
         tool_mapping.get("before_tool_call").is_some(),
         "tool_mapping must contain before_tool_call"
+    );
+    assert_eq!(
+        tool_mapping["before_tool_call"],
+        "/api/runners/:id/tool/preflight"
+    );
+    assert_eq!(
+        tool_mapping["before_tool_call_openclaw"],
+        "/api/openclaw/tool/preflight"
     );
 }
 

@@ -40,16 +40,19 @@
 //! confinement, and OWASP scenarios.
 
 pub mod approvals;
+pub mod claudecode_bridge;
 pub mod config;
 pub mod embedded_bridge;
 pub mod export_gate;
 pub mod helpers;
 pub mod model;
 pub mod openclaw_bridge;
+pub mod opencode_bridge;
 pub mod policy;
 pub mod receipts;
 pub mod runner;
 pub mod runners;
+pub mod sessions;
 pub mod staged_exports;
 pub mod ui;
 pub mod ui_logs;

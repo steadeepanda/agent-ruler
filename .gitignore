@@ -10,6 +10,7 @@
 /docs-site/node_modules/
 /docs-site/.vitepress/cache/
 /docs-site/docs/.vitepress/cache/
+/docs-site/docs/.vitepress/dist/
 /docs-site/docs/.vitepress/.temp/
 /docs/.vitepress/
 
@@ -20,11 +21,16 @@
 /bridge/.venv/
 /bridge/openclaw-channel-bridge.local.json
 /bridge/openclaw/channel-bridge.local.json
+.env
+.env.*
+!.env.example
 *.py[cod]
 .pytest_cache/
+/local/
 
 # Telegram E2E harness artifacts/runtime
 /artifacts/*
 
 
 .gitignore.local
+LOCAL_DEV_NOTES

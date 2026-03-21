@@ -2,9 +2,20 @@
   // ============================================
   // Runtime Page
   // ============================================
+  const RUNTIME_PATHS_HIDE_STORAGE_KEY = 'ar.runtime.hidePathsDisplay';
+
+  function readRuntimePathsHidePreference() {
+    return localStorage.getItem(RUNTIME_PATHS_HIDE_STORAGE_KEY) === '1';
+  }
+
+  function displayRuntimePath(rawValue, hidePaths) {
+    if (hidePaths) return '[hidden]';
+    return String(rawValue || '-');
+  }
 
   function renderRuntime(root) {
     const r = state.runtime || {};
+    const hidePaths = readRuntimePathsHidePreference();
     
     root.innerHTML = `
       <div class="grid grid-2">
@@ -14,56 +25,63 @@
             <span class="chip">Read Mostly</span>
           </div>
           <div class="card-body">
+            <div class="form-group">
+              <label class="form-check">
+                <input type="checkbox" id="runtime-hide-paths" class="form-check-input" ${hidePaths ? 'checked' : ''} />
+                <span class="form-check-label">Hide paths display</span>
+              </label>
+              <p class="form-hint">This page defaults to full absolute paths so operators can inspect exact locations.</p>
+            </div>
             <div class="table-container">
               <table class="table">
                 <tbody>
                   <tr>
                     <td><strong>Ruler Root</strong></td>
-                    <td class="mono">${esc(r.ruler_root)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.ruler_root, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Runtime Root</strong></td>
-                    <td class="mono">${esc(r.runtime_root)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.runtime_root, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Workspace</strong></td>
-                    <td class="mono">${esc(r.workspace)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.workspace, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Shared Zone</strong></td>
-                    <td class="mono">${esc(r.shared_zone)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.shared_zone, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>State Directory</strong></td>
-                    <td class="mono">${esc(r.state_dir)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.state_dir, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Policy File</strong></td>
-                    <td class="mono">${esc(r.policy_file)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.policy_file, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Receipts File</strong></td>
-                    <td class="mono">${esc(r.receipts_file)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.receipts_file, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Approvals File</strong></td>
-                    <td class="mono">${esc(r.approvals_file)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.approvals_file, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Staged Exports File</strong></td>
-                    <td class="mono">${esc(r.staged_exports_file)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.staged_exports_file, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Default Delivery Dir</strong></td>
-                    <td class="mono">${esc(r.default_delivery_dir)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.default_delivery_dir, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Exec Layer Dir</strong></td>
-                    <td class="mono">${esc(r.exec_layer_dir)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.exec_layer_dir, hidePaths))}</td>
                   </tr>
                   <tr>
                     <td><strong>Quarantine Dir</strong></td>
-                    <td class="mono">${esc(r.quarantine_dir)}</td>
+                    <td class="mono">${esc(displayRuntimePath(r.quarantine_dir, hidePaths))}</td>
                   </tr>
                 </tbody>
               </table>
@@ -102,6 +120,13 @@
     `;
 
     document.getElementById('runtime-save-paths').addEventListener('click', updateRuntimePaths);
+    document.getElementById('runtime-hide-paths')?.addEventListener('change', (event) => {
+      localStorage.setItem(
+        RUNTIME_PATHS_HIDE_STORAGE_KEY,
+        event.target.checked ? '1' : '0'
+      );
+      renderRuntime(root);
+    });
   }
 
   async function updateRuntimePaths() {

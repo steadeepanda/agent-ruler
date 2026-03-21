@@ -39,6 +39,57 @@ pub fn is_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Probe whether bubblewrap can actually create the required sandbox namespaces
+/// in the current host context.
+///
+/// This catches host policies that allow `bwrap --version` but reject user
+/// namespace setup during execution (for example, uid map restrictions).
+pub fn probe_runtime_availability() -> Result<(), String> {
+    if let Err(err) = ensure_bwrap_available() {
+        return Err(err.to_string());
+    }
+
+    let output = Command::new("bwrap")
+        .arg("--die-with-parent")
+        .arg("--new-session")
+        .arg("--ro-bind")
+        .arg("/")
+        .arg("/")
+        .arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--tmpfs")
+        .arg("/tmp")
+        .arg("--tmpfs")
+        .arg("/run")
+        .arg("--chdir")
+        .arg("/")
+        .arg("--")
+        .arg("/bin/true")
+        .output()
+        .map_err(|err| format!("launch bubblewrap runtime probe: {err}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr_text.is_empty() {
+        return Err(stderr_text);
+    }
+
+    let stdout_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout_text.is_empty() {
+        return Err(stdout_text);
+    }
+
+    Err(format!(
+        "bubblewrap runtime probe exited with code {}",
+        output.status.code().unwrap_or(1)
+    ))
+}
+
 /// Build a bubblewrap command for Linux confinement.
 ///
 /// Creates a sandboxed execution environment with:
@@ -49,15 +100,14 @@ pub fn is_available() -> bool {
 pub fn build_confined_command(
     cmd: &[String],
     runtime: &RuntimeState,
+    workspace_root: &Path,
     engine: &PolicyEngine,
 ) -> Result<Command> {
     ensure_bwrap_available()?;
 
-    let workspace = runtime
-        .config
-        .workspace
+    let workspace = workspace_root
         .canonicalize()
-        .unwrap_or_else(|_| runtime.config.workspace.clone());
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
     let shared_zone = runtime
         .config
         .shared_zone_dir

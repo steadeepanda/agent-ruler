@@ -24,6 +24,10 @@ pub struct StatusPayload {
     pub allow_degraded_confinement: bool,
     pub ui_show_debug_tools: bool,
     pub approval_wait_timeout_secs: u64,
+    pub selected_runner: Option<String>,
+    pub telegram_bridge_active_runner: Option<String>,
+    pub telegram_bridge_active_runners: Vec<String>,
+    pub telegram_bridge_in_sync: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +49,10 @@ pub struct RuntimePayload {
     pub quarantine_dir: String,
     pub ui_show_debug_tools: bool,
     pub approval_wait_timeout_secs: u64,
+    pub selected_runner: Option<String>,
+    pub telegram_bridge_active_runner: Option<String>,
+    pub telegram_bridge_active_runners: Vec<String>,
+    pub telegram_bridge_in_sync: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +63,7 @@ pub struct ReceiptQuery {
     pub q: Option<String>,
     pub verdict: Option<String>,
     pub action: Option<String>,
+    pub runner: Option<String>,
     pub include_details: Option<bool>,
 }
 
@@ -62,6 +71,7 @@ pub struct ReceiptQuery {
 pub struct ExportPayload {
     pub src: String,
     pub dst: Option<String>,
+    pub runner: Option<String>,
     pub bypass: Option<bool>,
     pub bypass_ack: Option<bool>,
     pub auto_approve: Option<bool>,
@@ -72,6 +82,7 @@ pub struct ExportPayload {
 pub struct DeliverPayload {
     pub stage_ref: String,
     pub dst: Option<String>,
+    pub runner: Option<String>,
     pub move_artifact: Option<bool>,
     pub bypass: Option<bool>,
     pub bypass_ack: Option<bool>,
@@ -83,6 +94,7 @@ pub struct DeliverPayload {
 pub struct ImportPayload {
     pub src: String,
     pub dst: Option<String>,
+    pub runner: Option<String>,
     pub bypass: Option<bool>,
     pub bypass_ack: Option<bool>,
     pub auto_approve: Option<bool>,
@@ -130,6 +142,8 @@ pub struct RuntimePathsPayload {
     pub allow_degraded_confinement: Option<bool>,
     pub approval_wait_timeout_secs: Option<u64>,
     pub openclaw_bridge: Option<OpenClawBridgePayload>,
+    pub claudecode_bridge: Option<TelegramBridgePayload>,
+    pub opencode_bridge: Option<TelegramBridgePayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +155,19 @@ pub struct OpenClawBridgePayload {
     pub state_file: Option<String>,
     pub openclaw_bin: Option<String>,
     pub agent_ruler_bin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramBridgePayload {
+    pub enabled: Option<bool>,
+    pub answer_streaming_enabled: Option<bool>,
+    pub poll_interval_seconds: Option<u64>,
+    pub decision_ttl_seconds: Option<u64>,
+    pub short_id_length: Option<u64>,
+    pub state_file: Option<String>,
+    pub bot_token: Option<String>,
+    pub chat_ids: Option<Vec<String>>,
+    pub allow_from: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +237,12 @@ pub struct UiLogQuery {
     pub q: Option<String>,
     pub level: Option<String>,
     pub source: Option<String>,
+    pub runner: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalQuery {
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +265,7 @@ pub struct UiLogEventPayload {
 #[derive(Debug, Deserialize)]
 pub struct FileListQuery {
     pub zone: String,
+    pub runner: Option<String>,
     pub q: Option<String>,
     pub limit: Option<usize>,
     pub prefix: Option<String>,
@@ -276,6 +310,8 @@ pub struct RedactedStatusEvent {
     pub verdict: String,
     pub reason_code: String,
     pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_hint: Option<String>,
     pub target_classification: String,

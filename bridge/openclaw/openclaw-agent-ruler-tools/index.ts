@@ -31,8 +31,28 @@ type ApprovalWaitOutcome = {
   approvalId: string;
   response: ApprovalWaitResponse;
 };
+const MISSING_EXPORT_SOURCE_SNIPPET = "export source does not exist:";
+const UUID_LIKE_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export default function registerAgentRulerTools(api: any) {
+  registerApprovalQueueBypassCommands(api);
+
+  registerOptionalTool(api, {
+    name: "agent_ruler_capabilities",
+    description:
+      "Read the Agent Ruler safe runtime/capabilities contract before boundary operations.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    async execute() {
+      const data = await callAgentRulerJson(api, "GET", "/api/capabilities");
+      return asTextResult(data);
+    },
+  });
+
   registerOptionalTool(api, {
     name: "agent_ruler_status_feed",
     description:
@@ -114,7 +134,7 @@ export default function registerAgentRulerTools(api: any) {
   registerOptionalTool(api, {
     name: "agent_ruler_request_export_stage",
     description:
-      "Request stage export via Agent Ruler (/api/export/request). Returns staged, blocked, or pending_approval.",
+      "Request stage export via Agent Ruler (/api/export/request). Returns staged, blocked, or pending_approval. Omit dst when no destination is specified so Agent Ruler uses runtime defaults.",
     parameters: {
       type: "object",
       properties: {
@@ -141,7 +161,7 @@ export default function registerAgentRulerTools(api: any) {
   registerOptionalTool(api, {
     name: "agent_ruler_request_delivery",
     description:
-      "Request delivery via Agent Ruler (/api/export/deliver/request). Returns delivered, blocked, or pending_approval.",
+      "Request delivery via Agent Ruler (/api/export/deliver/request). Returns delivered, blocked, or pending_approval. Omit dst when user destination is unspecified so Agent Ruler uses its default user destination directory.",
     parameters: {
       type: "object",
       properties: {
@@ -165,7 +185,7 @@ export default function registerAgentRulerTools(api: any) {
         body.move_artifact = params.move_artifact;
       }
 
-      return executeApprovalAwareRequest(api, "/api/export/deliver/request", body);
+      return executeDeliveryRequestWithAutoStage(api, stageRef, body);
     },
   });
 
@@ -201,6 +221,23 @@ export default function registerAgentRulerTools(api: any) {
 
 function registerOptionalTool(api: any, tool: OptionalToolDefinition) {
   api.registerTool(tool, { optional: true });
+}
+
+function registerApprovalQueueBypassCommands(api: any) {
+  if (typeof api?.registerCommand !== "function") {
+    return;
+  }
+
+  for (const commandName of ["arapprove", "ardeny"]) {
+    api.registerCommand({
+      name: commandName,
+      description:
+        "Internal Agent Ruler approval callback command used by Telegram inline buttons.",
+      acceptsArgs: true,
+      requireAuth: false,
+      handler: async () => undefined as any,
+    });
+  }
 }
 
 function registerToolPreflightHook(api: any) {
@@ -309,15 +346,19 @@ function buildToolBlockReason(
 
   if (status === "pending_approval") {
     const suffix = approvalId ? ` (approval_id=${approvalId})` : "";
-    return `Agent Ruler approval required for ${toolName}${suffix}`;
+    return `Agent Ruler approval required for ${toolName}${suffix}.${buildApprovalWorkflowHint(
+      approvalId
+    )}`;
   }
   if (reason && detail) {
-    return `Agent Ruler blocked ${toolName}: ${reason} (${detail})`;
+    return `Agent Ruler blocked ${toolName}: ${reason} (${detail})${buildBoundaryWorkflowHint(
+      reason
+    )}`;
   }
   if (detail) {
-    return `Agent Ruler blocked ${toolName}: ${detail}`;
+    return `Agent Ruler blocked ${toolName}: ${detail}${buildBoundaryWorkflowHint(reason)}`;
   }
-  return `Agent Ruler blocked ${toolName}`;
+  return `Agent Ruler blocked ${toolName}${buildBoundaryWorkflowHint(reason)}`;
 }
 
 function buildPendingApprovalWaitFailureReason(
@@ -331,6 +372,22 @@ function buildPendingApprovalWaitFailureReason(
     return `Agent Ruler approval ${wait.approvalId} still pending after wait timeout; ${toolName} remains blocked`;
   }
   return `Agent Ruler approval ${wait.approvalId} unresolved; ${toolName} remains blocked`;
+}
+
+function buildApprovalWorkflowHint(approvalId: string): string {
+  const suffix = approvalId ? ` (approval_id=${approvalId})` : "";
+  return ` Read agent_ruler_capabilities if you have not done so, then wait for operator resolution${suffix} with agent_ruler_wait_for_approval; do not loop-retry the same blocked action.`;
+}
+
+function buildBoundaryWorkflowHint(reasonCode: string): string {
+  const reason = String(reasonCode || "").toLowerCase();
+  if (reason === "deny_user_data_write") {
+    return " Use stage+deliver/import Agent Ruler tools for cross-zone transfers instead of direct destination writes. If the user did not specify a destination, omit dst so Agent Ruler uses its default user destination directory.";
+  }
+  if (reason === "deny_system_critical" || reason === "deny_secrets") {
+    return " Stay within workspace-safe paths, read agent_ruler_capabilities, and use Agent Ruler transfer tools.";
+  }
+  return " Follow Agent Ruler safe runtime workflow for boundary operations and use agent_ruler_capabilities for runtime discovery instead of guessing.";
 }
 
 async function executeApprovalAwareRequest(
@@ -371,6 +428,73 @@ async function executeApprovalAwareRequest(
   };
 
   return asTextResult(resolvedPayload);
+}
+
+async function executeDeliveryRequestWithAutoStage(
+  api: any,
+  stageRef: string,
+  body: JsonObject
+): Promise<ToolResult> {
+  try {
+    return await executeApprovalAwareRequest(api, "/api/export/deliver/request", body);
+  } catch (err) {
+    const detail = (err as Error)?.message || String(err);
+    if (!shouldAutoStageBeforeDelivery(detail, stageRef)) {
+      throw err;
+    }
+
+    const stageResult = await executeApprovalAwareRequest(api, "/api/export/request", {
+      src: stageRef,
+    });
+    const retriedResult = await executeApprovalAwareRequest(
+      api,
+      "/api/export/deliver/request",
+      body
+    );
+    return withAutoStageMetadata(retriedResult, stageRef, stageResult);
+  }
+}
+
+function shouldAutoStageBeforeDelivery(errorDetail: string, stageRef: string): boolean {
+  const detail = String(errorDetail || "").toLowerCase();
+  const reference = String(stageRef || "").trim();
+  if (!detail.includes(MISSING_EXPORT_SOURCE_SNIPPET)) {
+    return false;
+  }
+  if (!reference || UUID_LIKE_PATTERN.test(reference)) {
+    return false;
+  }
+  return true;
+}
+
+function withAutoStageMetadata(
+  deliveryResult: ToolResult,
+  stageRef: string,
+  stageResult: ToolResult
+): ToolResult {
+  const deliveryPayload = parseToolResultPayload(deliveryResult);
+  const stagePayload = parseToolResultPayload(stageResult);
+  if (!deliveryPayload) {
+    return deliveryResult;
+  }
+  return asTextResult({
+    ...deliveryPayload,
+    auto_staged_from: stageRef,
+    auto_stage_result: stagePayload ?? {},
+  });
+}
+
+function parseToolResultPayload(result: ToolResult): JsonObject | null {
+  const text = result?.content?.[0]?.text;
+  if (typeof text !== "string" || !text.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return asObject(parsed);
+  } catch {
+    return null;
+  }
 }
 
 function extractPendingApprovalId(payload: unknown): string {

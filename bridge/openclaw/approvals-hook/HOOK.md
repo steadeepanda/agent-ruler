@@ -1,8 +1,8 @@
 ---
 name: agent-ruler-approvals
-version: 0.1.7
+version: 0.1.8
 description: "Forward inbound channel interactions to the local Agent Ruler approvals bridge"
-homepage: "https://github.com/OpenClaw-Social/agent-ruler"
+homepage: "https://github.com/steadeepanda/agent-ruler"
 metadata:
   openclaw:
     emoji: "✅"

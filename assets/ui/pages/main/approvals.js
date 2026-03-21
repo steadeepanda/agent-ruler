@@ -1,5 +1,6 @@
   // Extracted from assets/ui/10-pages-main.js for page-scoped editing.
   async function renderApprovals(root) {
+    const runnerOptions = runnerFilterOptions();
     root.innerHTML = `
       <div class="card">
         <div class="card-header">
@@ -13,6 +14,16 @@
           </div>
         </div>
         <div class="card-body">
+          <div class="filters mb-4">
+            <div class="filter-group">
+              <label class="filter-label">Runner</label>
+              <select id="approvals-runner-filter" class="form-select">
+                ${runnerOptions.map((runner) => `
+                  <option value="${esc(runner.id)}" ${state.runnerFilter === runner.id ? 'selected' : ''}>${esc(runner.label)}</option>
+                `).join('')}
+              </select>
+            </div>
+          </div>
           <div id="approvals-list"></div>
         </div>
       </div>
@@ -20,6 +31,10 @@
     
     document.getElementById('approve-all').addEventListener('click', approveAll);
     document.getElementById('deny-all').addEventListener('click', denyAll);
+    document.getElementById('approvals-runner-filter').addEventListener('change', (event) => {
+      setRunnerFilter(event.target.value);
+      loadApprovals();
+    });
     
     await loadApprovals();
   }
@@ -29,7 +44,12 @@
     if (!container) return;
     
     try {
-      state.approvals = await api('/api/approvals');
+      const params = new URLSearchParams();
+      if (state.runnerFilter && state.runnerFilter !== 'all') {
+        params.set('runner', state.runnerFilter);
+      }
+      const querySuffix = params.toString() ? `?${params}` : '';
+      state.approvals = await api(`/api/approvals${querySuffix}`);
       const normalizedApprovals = (Array.isArray(state.approvals) ? state.approvals : [])
         .map((item) => {
           const approval = item?.approval || item || {};
@@ -60,6 +80,7 @@
             <div class="approval-badges">
               <span class="chip chip-warning">Pending</span>
               <span class="chip">${esc(item.approval.reason)}</span>
+              <span class="chip">${esc((item.approval.action?.metadata?.runner_id || 'unknown').toString())}</span>
               <span class="chip">Expires: ${formatRelativeTime(item.approval.expires_at)}</span>
             </div>
           </div>
@@ -70,12 +91,16 @@
               <span class="approval-meta-value">${esc(item.approval.action.operation)}</span>
             </div>
             <div class="approval-meta-item">
+              <span class="approval-meta-label">Runner:</span>
+              <span class="approval-meta-value">${esc(item.approval.action?.metadata?.runner_id || '-')}</span>
+            </div>
+            <div class="approval-meta-item">
               <span class="approval-meta-label">Source:</span>
-              <span class="approval-meta-value">${esc(item.resolved_src || '-')}</span>
+              <span class="approval-meta-value">${esc(aliasRuntimePath(item.resolved_src || '-'))}</span>
             </div>
             <div class="approval-meta-item">
               <span class="approval-meta-label">Destination:</span>
-              <span class="approval-meta-value">${esc(item.resolved_dst || '-')}</span>
+              <span class="approval-meta-value">${esc(aliasRuntimePath(item.resolved_dst || '-'))}</span>
             </div>
             ${item.diff_summary ? `
               <div class="approval-meta-item">

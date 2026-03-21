@@ -20,6 +20,7 @@ const UI_JS: &str = concat!(
     include_str!("../../../assets/ui/pages/main/import-export.js"),
     include_str!("../../../assets/ui/pages/configuration/policy.js"),
     include_str!("../../../assets/ui/pages/monitoring/receipts.js"),
+    include_str!("../../../assets/ui/pages/monitoring/runners.js"),
     include_str!("../../../assets/ui/pages/configuration/runtime-paths.js"),
     include_str!("../../../assets/ui/pages/configuration/control-settings.js"),
     include_str!("../../../assets/ui/pages/configuration/execution-layer.js"),
@@ -67,6 +68,10 @@ pub async fn index_policy() -> Response {
 
 pub async fn index_receipts() -> Response {
     shell_response("receipts")
+}
+
+pub async fn index_runners() -> Response {
+    shell_response("runners")
 }
 
 pub async fn index_runtime() -> Response {

@@ -47,6 +47,9 @@
     refreshStatus()
       .then(() => {
         renderPage();
+        if (typeof window.preloadRunnersFleet === 'function') {
+          window.preloadRunnersFleet();
+        }
         return fetchUpdateStatus({ force: false, quiet: true });
       })
       .then(() => {

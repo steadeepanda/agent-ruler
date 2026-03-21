@@ -53,7 +53,7 @@ const sidebar = orderedSections.map((section) => ({
 
 const nav = [
   { text: 'Getting Started', link: '/guides/getting-started' },
-  { text: 'Integrations', link: '/integrations/openclaw-guide' },
+  { text: 'Integrations', link: '/integrations/guide' },
   { text: 'Concepts', link: '/concepts/zones-and-flows' },
   { text: 'Security', link: '/security/prompt-injection' },
   { text: 'CLI', link: '/reference/cli' },

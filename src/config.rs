@@ -320,6 +320,34 @@ fn default_user_installs_root() -> PathBuf {
     PathBuf::from(".local/share/agent-ruler/installs")
 }
 
+fn installed_user_data_root_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
+    let canonical = canonical_or_original(exe_path);
+    let exe_dir = canonical.parent()?;
+    let install_instance_dir = if exe_dir
+        .file_name()
+        .map(|name| name == "bin")
+        .unwrap_or(false)
+    {
+        exe_dir.parent()?
+    } else {
+        exe_dir
+    };
+    let installs_dir = install_instance_dir.parent()?;
+    if installs_dir.file_name()? != "installs" {
+        return None;
+    }
+    let user_data_root = installs_dir.parent()?;
+    if user_data_root.file_name()? != APP_DIR_NAME {
+        return None;
+    }
+    Some(user_data_root.to_path_buf())
+}
+
+fn installed_user_data_root_from_current_exe() -> Option<PathBuf> {
+    let exe_path = env::current_exe().ok()?;
+    installed_user_data_root_from_exe_path(&exe_path)
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeLayout {
     pub ruler_root: PathBuf,
@@ -862,8 +890,12 @@ pub fn load_runtime(ruler_root: &Path, runtime_dir: Option<&Path>) -> Result<Run
 
     if loaded_ruler_root != expected_ruler_root {
         let previous_default_delivery = default_delivery_dir_for_project(&loaded_ruler_root);
+        let legacy_previous_default_delivery =
+            legacy_default_delivery_dir_for_project(&loaded_ruler_root);
         config.ruler_root = expected_ruler_root.clone();
-        if config.default_delivery_dir == previous_default_delivery {
+        if config.default_delivery_dir == previous_default_delivery
+            || config.default_delivery_dir == legacy_previous_default_delivery
+        {
             config.default_delivery_dir = default_delivery_dir_for_project(&expected_ruler_root);
         }
         save_config(&layout.config_file, &config).with_context(|| {
@@ -969,6 +1001,13 @@ fn ensure_runtime_artifacts(config: &AppConfig) -> Result<()> {
 
 // Use XDG data dir for persistent mutable state; this keeps source trees clean by default.
 fn default_runtime_base_dir() -> PathBuf {
+    // Release/dev installs keep mutable runtime state alongside the managed
+    // installs root so shell-specific XDG wrappers (for example VS Code Snap)
+    // cannot silently split one machine into multiple Agent Ruler runtimes.
+    if let Some(root) = installed_user_data_root_from_current_exe() {
+        return root;
+    }
+
     if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
         if !xdg_data_home.trim().is_empty() {
             return PathBuf::from(xdg_data_home).join(APP_DIR_NAME);
@@ -1027,17 +1066,37 @@ fn sanitize_segment(input: &str) -> String {
 }
 
 fn default_delivery_dir_for_project(ruler_root: &Path) -> PathBuf {
+    default_delivery_dir_with_roots(ruler_root, dirs::document_dir(), dirs::home_dir())
+}
+
+fn default_delivery_dir_with_roots(
+    ruler_root: &Path,
+    documents: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+) -> PathBuf {
+    if let Some(documents) = documents {
+        return documents.join("agent-ruler-deliveries");
+    }
+
+    if let Some(home_dir) = home_dir {
+        return home_dir.join("Documents").join("agent-ruler-deliveries");
+    }
+
+    ruler_root.join("exports")
+}
+
+fn legacy_default_delivery_dir_for_project(ruler_root: &Path) -> PathBuf {
     let project_name = ruler_root
         .file_name()
         .map(|n| sanitize_segment(&n.to_string_lossy()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "project".to_string());
 
-    if let Some(documents) = dirs::document_dir() {
-        return documents.join("agent-ruler-deliveries").join(project_name);
-    }
-
-    ruler_root.join("exports")
+    default_delivery_dir_with_roots(
+        ruler_root,
+        dirs::document_dir().map(|documents| documents.join(project_name)),
+        None,
+    )
 }
 
 fn canonical_or_original(path: &Path) -> PathBuf {
@@ -1063,16 +1122,18 @@ fn expand_patterns(patterns: &[String], workspace: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::Path;
 
     use tempfile::tempdir;
 
     use super::{
-        init_layout, load_policy, load_runtime, resolve_runtime_layout,
-        DEFAULT_ALLOWLISTED_APT_PACKAGES, DEFAULT_ALLOWLISTED_CARGO_PACKAGES,
-        DEFAULT_ALLOWLISTED_NPM_PACKAGES, DEFAULT_ALLOWLISTED_PIP_PACKAGES,
-        DEFAULT_DENYLISTED_APT_PACKAGES, DEFAULT_DENYLISTED_CARGO_PACKAGES,
-        DEFAULT_DENYLISTED_NPM_PACKAGES, DEFAULT_DENYLISTED_PIP_PACKAGES,
-        DEFAULT_SAFE_GET_DOMAIN_ALLOWLIST_PRESETS, DEFAULT_SAFE_POST_DOMAIN_ALLOWLIST_PRESETS,
+        default_delivery_dir_with_roots, init_layout, installed_user_data_root_from_exe_path,
+        load_policy, load_runtime, resolve_runtime_layout, DEFAULT_ALLOWLISTED_APT_PACKAGES,
+        DEFAULT_ALLOWLISTED_CARGO_PACKAGES, DEFAULT_ALLOWLISTED_NPM_PACKAGES,
+        DEFAULT_ALLOWLISTED_PIP_PACKAGES, DEFAULT_DENYLISTED_APT_PACKAGES,
+        DEFAULT_DENYLISTED_CARGO_PACKAGES, DEFAULT_DENYLISTED_NPM_PACKAGES,
+        DEFAULT_DENYLISTED_PIP_PACKAGES, DEFAULT_SAFE_GET_DOMAIN_ALLOWLIST_PRESETS,
+        DEFAULT_SAFE_POST_DOMAIN_ALLOWLIST_PRESETS,
     };
 
     #[test]
@@ -1165,5 +1226,55 @@ mod tests {
             super::canonical_or_original(new_root.path()),
             "runtime config root should follow the current binary root"
         );
+    }
+
+    #[test]
+    fn installed_runtime_data_root_follows_install_layout() {
+        let exe = Path::new("/home/test/.local/share/agent-ruler/installs/dev/agent-ruler");
+        let root = installed_user_data_root_from_exe_path(exe).expect("install root");
+        assert_eq!(root, Path::new("/home/test/.local/share/agent-ruler"));
+    }
+
+    #[test]
+    fn installed_runtime_data_root_supports_bin_layout() {
+        let exe = Path::new("/home/test/.local/share/agent-ruler/installs/v1/bin/agent-ruler");
+        let root = installed_user_data_root_from_exe_path(exe).expect("install root");
+        assert_eq!(root, Path::new("/home/test/.local/share/agent-ruler"));
+    }
+
+    #[test]
+    fn installed_runtime_data_root_ignores_dev_tree_binaries() {
+        let exe = Path::new("/home/test/src/agent-ruler/target/debug/agent-ruler");
+        assert!(installed_user_data_root_from_exe_path(exe).is_none());
+    }
+
+    #[test]
+    fn default_delivery_dir_uses_documents_root_without_project_suffix() {
+        let ruler_root = Path::new("/tmp/example-project");
+        let documents = Path::new("/tmp/docs");
+        let delivery = default_delivery_dir_with_roots(
+            ruler_root,
+            Some(documents.to_path_buf()),
+            Some(Path::new("/tmp/home").to_path_buf()),
+        );
+        assert_eq!(delivery, documents.join("agent-ruler-deliveries"));
+    }
+
+    #[test]
+    fn default_delivery_dir_falls_back_to_home_documents_when_documents_unavailable() {
+        let ruler_root = Path::new("/tmp/example-project");
+        let home = Path::new("/tmp/home");
+        let delivery = default_delivery_dir_with_roots(ruler_root, None, Some(home.to_path_buf()));
+        assert_eq!(
+            delivery,
+            home.join("Documents").join("agent-ruler-deliveries")
+        );
+    }
+
+    #[test]
+    fn default_delivery_dir_falls_back_to_project_exports_when_no_user_dirs_are_available() {
+        let ruler_root = Path::new("/tmp/example-project");
+        let delivery = default_delivery_dir_with_roots(ruler_root, None, None);
+        assert_eq!(delivery, ruler_root.join("exports"));
     }
 }

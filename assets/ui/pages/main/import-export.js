@@ -4,6 +4,9 @@
     shared: null,
     deliver: null
   };
+  const IMPORT_EXPORT_RUNNER_STORAGE_KEY = 'ar.files.runner';
+  const IMPORT_EXPORT_RUNNERS = ['openclaw', 'claudecode', 'opencode'];
+  let importExportRunnerSelection = null;
 
   const fallbackNormalizePrefix = (value) => {
     const segments = String(value || '')
@@ -51,13 +54,35 @@
   const normalizePrefix = pathUtils.normalizeBrowserPrefix;
   const basename = pathUtils.basename;
 
-  function buildFilesListUrl(zone, prefix, limit = 400) {
+  function normalizeImportExportRunner(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return IMPORT_EXPORT_RUNNERS.includes(normalized) ? normalized : null;
+  }
+
+  function preferredImportExportRunner() {
+    const fromStorage = normalizeImportExportRunner(localStorage.getItem(IMPORT_EXPORT_RUNNER_STORAGE_KEY));
+    if (fromStorage) return fromStorage;
+
+    const fromRuntime = normalizeImportExportRunner(state.runtime?.selected_runner);
+    if (fromRuntime) return fromRuntime;
+
+    const fromStatus = normalizeImportExportRunner(state.status?.selected_runner);
+    if (fromStatus) return fromStatus;
+
+    return 'openclaw';
+  }
+
+  function buildFilesListUrl(zone, prefix, limit = 400, runnerId = null) {
     const params = new URLSearchParams();
     params.set('zone', zone);
     params.set('limit', String(limit));
     const normalizedPrefix = normalizePrefix(prefix || '');
     if (normalizedPrefix) {
       params.set('prefix', normalizedPrefix);
+    }
+    const normalizedRunner = normalizeImportExportRunner(runnerId);
+    if (normalizedRunner) {
+      params.set('runner', normalizedRunner);
     }
     return `/api/files/list?${params.toString()}`;
   }
@@ -68,7 +93,8 @@
     title,
     chipLabel,
     selectionMode = 'multi',
-    dropConfig = null
+    dropConfig = null,
+    runnerProvider = null
   }) {
     if (!container) return null;
 
@@ -426,7 +452,8 @@
       state.selection.clear();
       state.lastClickIndex = null;
       try {
-        const entries = await api(buildFilesListUrl(zoneKind, prefix, 800));
+        const selectedRunner = typeof runnerProvider === 'function' ? runnerProvider() : null;
+        const entries = await api(buildFilesListUrl(zoneKind, prefix, 800, selectedRunner));
         state.entries = entries;
         state.viewEntries = buildViewEntries(prefix, entries);
         renderEntries();
@@ -483,12 +510,19 @@
     return `${normalizedDest}/${srcPath}`;
   }
 
+  function buildOptionalDeliveryDestination(destPrefix, stageRef) {
+    const normalizedDest = normalizePrefix(destPrefix || '');
+    if (!normalizedDest) return null;
+    return buildDestinationPath(normalizedDest, stageRef);
+  }
+
   async function stagePaths(paths, destPrefix, options = {}) {
     if (!paths.length) {
       toast('Select at least one workspace item to stage', 'warning');
       return;
     }
     const autoApprove = options.dropTriggered ? shouldAutoApproveDropActions() : getFlowSource() === 'user';
+    const runner = normalizeImportExportRunner(importExportRunnerSelection);
     const normalizedPaths = paths.map((path) => normalizePrefix(path)).filter(Boolean);
     if (!normalizedPaths.length) {
       toast('No valid workspace entries selected', 'warning');
@@ -502,6 +536,7 @@
           body: {
             src,
             dst: buildDestinationPath(destPrefix, src),
+            runner,
             ...autoApprovePayload(autoApprove)
           }
         });
@@ -533,6 +568,7 @@
       return;
     }
     const autoApprove = options.dropTriggered ? shouldAutoApproveDropActions() : getFlowSource() === 'user';
+    const runner = normalizeImportExportRunner(importExportRunnerSelection);
     const summary = { success: 0, pending: 0, errors: [] };
     for (const stageRef of paths) {
       try {
@@ -540,8 +576,9 @@
           method: 'POST',
           body: {
             stage_ref: stageRef,
-            dst: buildDestinationPath(destPrefix, stageRef),
+            dst: buildOptionalDeliveryDestination(destPrefix, stageRef),
             move_artifact: false,
+            runner,
             ...autoApprovePayload(autoApprove)
           }
         });
@@ -571,6 +608,9 @@
     const source = getFlowSource();
     const preview = getPreviewMode();
     const dragDropAutoApprove = getDragDropAutoApprovePreference();
+    let selectedRunner = normalizeImportExportRunner(importExportRunnerSelection) || preferredImportExportRunner();
+    importExportRunnerSelection = selectedRunner;
+    const runnerOptions = runnerFilterOptions().filter((option) => option.id !== 'all');
 
     root.innerHTML = `
       <div class="card mb-5">
@@ -586,6 +626,15 @@
           </div>
         </div>
         <div class="card-body">
+        <div class="form-group">
+          <label class="form-label">Runner Context</label>
+          <select id="files-runner-context" class="form-select">
+            ${runnerOptions.map((option) => `
+              <option value="${esc(option.id)}" ${selectedRunner === option.id ? 'selected' : ''}>${esc(option.label)}</option>
+            `).join('')}
+          </select>
+          <p class="form-hint">Import / Export workspace explorer follows this runner's managed Zone 0 path.</p>
+        </div>
         <div class="grid grid-2">
           <div>
             <label class="form-label">Action Source</label>
@@ -642,6 +691,7 @@
           </div>
           <div class="card-body">
             <p class="text-muted">Agent working directory with full read/write access.</p>
+            <p id="zone-path-workspace" class="form-hint mono">-</p>
             <div id="zone-browser-workspace" class="mt-4"></div>
           </div>
         </div>
@@ -652,6 +702,7 @@
           </div>
           <div class="card-body">
             <p class="text-muted">Staged exports awaiting delivery approval.</p>
+            <p id="zone-path-shared" class="form-hint mono">-</p>
             <div id="zone-browser-shared" class="mt-4"></div>
           </div>
         </div>
@@ -662,11 +713,41 @@
           </div>
           <div class="card-body">
             <p class="text-muted">Final delivery destination for completed exports.</p>
+            <p id="zone-path-deliver" class="form-hint mono">-</p>
             <div id="zone-browser-deliver" class="mt-4"></div>
           </div>
         </div>
       </div>
     `;
+
+    const runnerContextSelect = document.getElementById('files-runner-context');
+    const workspacePathEl = document.getElementById('zone-path-workspace');
+    const sharedPathEl = document.getElementById('zone-path-shared');
+    const deliverPathEl = document.getElementById('zone-path-deliver');
+
+    const applyRunnerPathHints = (runtimePayload) => {
+      if (workspacePathEl) {
+        workspacePathEl.textContent = aliasRuntimePath(runtimePayload?.workspace || '-');
+      }
+      if (sharedPathEl) {
+        sharedPathEl.textContent = aliasRuntimePath(runtimePayload?.shared_zone || '-');
+      }
+      if (deliverPathEl) {
+        deliverPathEl.textContent = aliasRuntimePath(runtimePayload?.default_user_destination_dir || runtimePayload?.default_delivery_dir || '-');
+      }
+    };
+
+    const refreshRunnerPathHints = async () => {
+      const runnerId = normalizeImportExportRunner(importExportRunnerSelection) || preferredImportExportRunner();
+      const runtimePath = `/api/runtime?runner=${encodeURIComponent(runnerId)}`;
+      try {
+        const runtimePayload = await api(runtimePath);
+        applyRunnerPathHints(runtimePayload);
+      } catch (err) {
+        applyRunnerPathHints(null);
+        toast(`Failed to refresh runner paths: ${err.message}`, 'warning');
+      }
+    };
 
     const workspaceContainer = document.getElementById('zone-browser-workspace');
     const sharedContainer = document.getElementById('zone-browser-shared');
@@ -677,7 +758,8 @@
       zoneKind: 'workspace',
       title: 'Workspace Explorer',
       chipLabel: 'Zone 0',
-      selectionMode: 'multi'
+      selectionMode: 'multi',
+      runnerProvider: () => importExportRunnerSelection
     });
 
     zoneBrowserInstances.shared = createZoneFileBrowser({
@@ -686,6 +768,7 @@
       title: 'Shared Zone Explorer',
       chipLabel: 'Zone 2',
       selectionMode: 'multi',
+      runnerProvider: () => importExportRunnerSelection,
       dropConfig: {
         from: 'workspace',
         hint: 'Drop workspace items here to stage them.',
@@ -700,6 +783,7 @@
       title: 'Deliveries Explorer',
       chipLabel: 'User Destination',
       selectionMode: 'multi',
+      runnerProvider: () => importExportRunnerSelection,
       dropConfig: {
         from: 'shared',
         hint: 'Drop shared zone items here to deliver them.',
@@ -707,6 +791,22 @@
         handler: (paths, prefix) => deliverPaths(paths, prefix, { dropTriggered: true })
       }
     });
+
+    if (runnerContextSelect) {
+      runnerContextSelect.addEventListener('change', async (event) => {
+        const nextRunner = normalizeImportExportRunner(event.target.value) || preferredImportExportRunner();
+        selectedRunner = nextRunner;
+        importExportRunnerSelection = nextRunner;
+        localStorage.setItem(IMPORT_EXPORT_RUNNER_STORAGE_KEY, nextRunner);
+        await refreshRunnerPathHints();
+        await Promise.all([
+          zoneBrowserInstances.workspace?.load('') || Promise.resolve(),
+          zoneBrowserInstances.shared?.load('') || Promise.resolve(),
+          zoneBrowserInstances.deliver?.load('') || Promise.resolve()
+        ]);
+      });
+    }
+    refreshRunnerPathHints();
 
     const flowSourceSelect = document.getElementById('flow-source');
     const dragDropRow = document.getElementById('drag-drop-auto-approve-row');
@@ -835,11 +935,13 @@
       const uploaded = await uploadImportFile(fileInput.files[0]);
       const autoApprove = getFlowSource() === 'user';
       const dst = useCustomDst ? customDst : (uploaded.suggested_dst || null);
+      const runner = normalizeImportExportRunner(importExportRunnerSelection);
       const result = await api('/api/import/request', {
         method: 'POST',
         body: {
           src: uploaded.uploaded_src,
           dst,
+          runner,
           ...autoApprovePayload(autoApprove)
         }
       });
@@ -924,9 +1026,10 @@
     }
     
     try {
+      const runner = normalizeImportExportRunner(importExportRunnerSelection);
       const result = await api('/api/export/preview', {
         method: 'POST',
-        body: { src, dst: useCustomDst ? customDst : null }
+        body: { src, dst: useCustomDst ? customDst : null, runner }
       });
       
       const preview = document.getElementById('stage-preview');
@@ -960,9 +1063,10 @@
     
     try {
       const autoApprove = getFlowSource() === 'user';
+      const runner = normalizeImportExportRunner(importExportRunnerSelection);
       const result = await api('/api/export/request', {
         method: 'POST',
-        body: { src, dst, ...autoApprovePayload(autoApprove) }
+        body: { src, dst, runner, ...autoApprovePayload(autoApprove) }
       });
       
       if (result.status === 'staged') {
@@ -1051,9 +1155,10 @@
     }
     
     try {
+      const runner = normalizeImportExportRunner(importExportRunnerSelection);
       const result = await api('/api/export/deliver/preview', {
         method: 'POST',
-        body: { stage_ref: ref, dst: useCustomDst ? customDst : null }
+        body: { stage_ref: ref, dst: useCustomDst ? customDst : null, runner }
       });
       
       const preview = document.getElementById('deliver-preview');
@@ -1088,12 +1193,14 @@
     
     try {
       const autoApprove = getFlowSource() === 'user';
+      const runner = normalizeImportExportRunner(importExportRunnerSelection);
       const result = await api('/api/export/deliver/request', {
         method: 'POST',
         body: {
           stage_ref: ref,
           dst,
           move_artifact: move,
+          runner,
           ...autoApprovePayload(autoApprove)
         }
       });
