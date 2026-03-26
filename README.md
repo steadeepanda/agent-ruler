@@ -36,11 +36,9 @@ This recording shows the redesigned Control Panel flow for `v0.1.9`.
 The clip itself still shows `v0.1.8` in the UI because I forgot to update the version label before exporting it.
 
 <p align="center">
-  <video controls autoplay muted loop playsinline poster="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404-poster.png" width="900">
-    <source src="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4" type="video/mp4" />
-    Your browser does not support the video tag. Open the showcase video:
-    [agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4](docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4)
-  </video>
+  <a href="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4">
+    <img src="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.gif" alt="Agent Ruler Control Panel showcase preview" width="900" />
+  </a>
 </p>
 
 </details>
