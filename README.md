@@ -36,9 +36,11 @@ This recording shows the redesigned Control Panel flow for `v0.1.9`.
 The clip itself still shows `v0.1.8` in the UI because I forgot to update the version label before exporting it.
 
 <p align="center">
-  <a href="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4">
-    <img src="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404-poster.png" alt="Agent Ruler Control Panel showcase preview" width="900" />
-  </a>
+  <video controls autoplay muted loop playsinline poster="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404-poster.png" width="900">
+    <source src="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4" type="video/mp4" />
+    Your browser does not support the video tag. Open the showcase video:
+    [agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4](docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4)
+  </video>
 </p>
 
 </details>
@@ -47,7 +49,7 @@ The clip itself still shows `v0.1.8` in the UI because I forgot to update the ve
 <summary><strong>Live Channel Workflow Demo (Telegram)</strong></summary>
 
 This demo shows a small end-to-end transfer flow where an agent-side workspace file is mediated through Agent Ruler and delivered to the user destination with channel-assisted operator decisions.
-Demo context: recorded with OpenClaw on release `v0.1.7`.
+Demo context: recorded with Claude Code on release `v0.1.8`.
 
 <img src="docs-site/docs/public/images/telegram-live-showcase-01.jpg" alt="Telegram workflow demo step 1" width="450" />
 <img src="docs-site/docs/public/images/telegram-live-showcase-02.jpg" alt="Telegram workflow demo step 2" width="450" />
