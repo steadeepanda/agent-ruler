@@ -5,78 +5,75 @@
 
   function renderExecution(root) {
     root.innerHTML = `
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">One-Shot Command Runner</h3>
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2 class="settings-title">Execution Layer</h2>
+          <p class="settings-description">Perform one-shot commands, troubleshoot, and manage runner state.</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <h3>One-Shot Command</h3>
+            <p>Run a single script inside Agent Ruler confinement and inspect deterministic results.</p>
+            <p class="form-hint" style="margin-top: var(--space-4);">Operator note: run-command endpoints are for deterministic troubleshooting; routine agent work should run through normal agent tasks and policy gates.</p>
           </div>
-          <div class="card-body">
-            <p class="text-muted mb-4">
-              Run a single troubleshooting command inside Agent Ruler confinement and inspect deterministic results.
-            </p>
-            <div class="form-group">
-              <label class="form-label">Command (bash)</label>
-              <textarea id="exec-one-shot-script" class="form-textarea" placeholder="example: echo hello && ls -la"></textarea>
-              <p class="form-hint">Runs through <code>/api/run/script</code> and writes receipts visible in Timeline.</p>
+          <div class="settings-section-content">
+            <div class="settings-row" style="background: var(--content-bg); border: 1px solid var(--content-border); padding: var(--space-4); border-radius: var(--radius-lg);">
+              <label class="form-label">Command Script (bash)</label>
+              <textarea id="exec-one-shot-script" class="form-textarea mono" placeholder="example: echo hello && ls -la" style="min-height: 120px; font-size: 0.85rem;"></textarea>
+              <p class="form-hint" style="margin-top: var(--space-2);">Runs through <code class="mono">/api/run/script</code> and writes receipts visible in Timeline.</p>
+              <div class="mt-4">
+                <button id="exec-one-shot-run" class="btn btn-secondary" style="align-self: flex-start;">Run Command</button>
+              </div>
             </div>
-            <button id="exec-one-shot-run" class="btn btn-primary">Run Command</button>
-            <div id="exec-one-shot-result" class="diff-preview hidden mt-4"></div>
+            <div id="exec-one-shot-result" class="diff-preview hidden" style="border-radius: var(--radius-lg); overflow: hidden; margin-top: var(--space-2);"></div>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Execution Layer</h3>
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <h3>Reset Execution Layer</h3>
+            <p>Terminate running processes and clear ephemeral state.</p>
           </div>
-          <div class="card-body">
-            <p class="text-muted mb-4">
-              The execution layer contains ephemeral state for running agent processes.
-              Resetting it will clear this state but preserve persistent data like receipts and approvals.
-            </p>
-            <p class="form-hint mb-4">
-              Operator note: run-command endpoints are for deterministic troubleshooting; routine agent work should run through normal agent tasks and policy gates.
-            </p>
-            
-            <div class="alert alert-warning mb-4">
-              <span class="alert-icon">⚠️</span>
-              <div class="alert-content">
-                <div class="alert-title">Warning</div>
-                <div class="alert-message">Resetting the execution layer will terminate any running agent processes.</div>
+          <div class="settings-section-content">
+            <div class="settings-row" style="background: var(--danger-bg); border: 1px solid var(--danger-border); padding: var(--space-4); border-radius: var(--radius-lg);">
+              <div style="display: flex; gap: var(--space-3); color: var(--danger);">
+                <span style="font-size: 1.2rem;">⚠️</span>
+                <div>
+                  <h4 style="font-weight: 600; font-size: 0.95rem; margin: 0 0 var(--space-1) 0; color: var(--danger);">Reset Execution Layer Mode</h4>
+                  <p style="font-size: 0.85rem; margin: 0; color: var(--text-primary);">This will terminate any running agent processes immediately. Receipts and approvals are preserved.</p>
+                </div>
+              </div>
+              <div class="mt-4">
+                <button id="reset-exec" class="btn btn-danger" style="align-self: flex-start;">Reset Execution Layer</button>
               </div>
             </div>
           </div>
-          <div class="card-footer">
-            <button id="reset-exec" class="btn btn-danger">Reset Execution Layer</button>
-          </div>
         </div>
-      </div>
 
-      <div class="card mt-5">
-        <div class="card-header">
-          <h3 class="card-title">Reset Agent Ruler Runtime</h3>
-        </div>
-        <div class="card-body">
-          <p class="text-muted mb-4">
-            Use this when runtime state gets messy and you want a clean baseline without reinstalling.
-          </p>
-          <label class="form-check mb-3">
-            <input type="checkbox" id="reset-runtime-keep-config" class="form-check-input" checked />
-            <span class="form-check-label">Keep current config and policy</span>
-          </label>
-          <p class="form-hint mb-4">
-            If enabled: keeps your config/policy wiring (agent ↔ ruler ↔ user paths and toggles), while clearing runtime state artifacts.
-            If disabled: restores default config/policy plus fresh runtime state.
-          </p>
-          <div class="alert alert-warning">
-            <span class="alert-icon">⚠️</span>
-            <div class="alert-content">
-              <div class="alert-title">Reset Scope</div>
-              <div class="alert-message">Runtime reset removes receipts, approvals, staged exports, and execution artifacts under the runtime root.</div>
+        <div class="settings-section" style="border-bottom: none;">
+          <div class="settings-section-header">
+            <h3>Reset Agent Ruler Runtime</h3>
+            <p>Use this when runtime state gets messy and you want a clean baseline without reinstalling.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="settings-row" style="background: var(--bg-primary); border: 1px solid var(--danger-border); padding: var(--space-4); border-radius: var(--radius-lg);">
+              <label class="form-switch" style="align-items: center;">
+                <input type="checkbox" id="reset-runtime-keep-config" class="form-switch-input" checked />
+                <div class="form-switch-text">
+                  <span class="form-switch-label" style="font-weight: 600;">Keep current config and policy</span>
+                </div>
+              </label>
+              <div style="font-size: 0.85rem; color: var(--text-primary); margin-top: var(--space-4); line-height: 1.5; padding-left: 2px;">
+                <p style="margin: 0 0 var(--space-2) 0;"><strong>If checked:</strong> keeps your config/policy wiring (agent ↔ ruler ↔ user paths and toggles), while clearing runtime state artifacts.</p>
+                <p style="margin: 0 0 var(--space-2) 0;"><strong>If unchecked:</strong> restores default config/policy and creates fresh runtime state.</p>
+                <p style="margin: 0; color: var(--danger); font-weight: 500;">Note: Runtime reset removes receipts, approvals, staged exports, and execution artifacts under the runtime root.</p>
+              </div>
+              <div class="mt-4">
+                <button id="reset-runtime" class="btn btn-danger" style="align-self: flex-start;">Reset Runtime</button>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="card-footer">
-          <button id="reset-runtime" class="btn btn-danger">Reset Runtime</button>
         </div>
       </div>
     `;

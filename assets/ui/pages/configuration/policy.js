@@ -253,15 +253,27 @@
     };
 
     root.innerHTML = `
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Policy Profile</h3>
+      <div class="settings-container">
+        <div class="settings-header" style="margin-bottom: var(--space-6); padding-bottom: var(--space-6); border-bottom: 1px solid var(--content-border);">
+          <div>
+            <h2 class="settings-title">Policy Configuration</h2>
+            <p class="settings-description">Manage security boundaries and execution rules.</p>
           </div>
-          <div class="card-body">
-            <div class="form-group">
+          <div style="display: flex; gap: var(--space-2);">
+             <button id="policy-reset-all" class="btn btn-ghost btn-sm" style="display: none;">Discard Changes</button>
+             <button id="policy-save-all" class="btn btn-primary btn-sm" disabled>Save Changes</button>
+          </div>
+        </div>
+
+        <div class="settings-section" style="margin-bottom: var(--space-6);">
+          <div class="settings-section-header">
+            <h3>Policy Profile</h3>
+            <p>Active security baseline and capability locks.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="settings-row">
               <label class="form-label">Active Profile</label>
-              <select id="policy-profile" class="form-select">
+              <select id="policy-profile" class="form-select" style="max-width: 400px;">
                 ${profiles.map(profile => `
                   <option value="${esc(profile.id)}" ${effectiveProfileId === profile.id ? 'selected' : ''}>
                     ${esc(profile.label)}
@@ -272,318 +284,376 @@
             </div>
 
             ${activeProfile?.details?.length ? `
-              <div class="alert alert-info mb-4">
-                <span class="alert-icon">ℹ</span>
+              <div class="alert alert-info mt-4">
+                <div class="alert-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                </div>
                 <div class="alert-content">
-                  <div class="alert-title">What This Profile Does</div>
-                  <div class="alert-message">
-                    <ul style="margin: 8px 0 0 16px;">
-                      ${activeProfile.details.map(item => `<li>${esc(item)}</li>`).join('')}
-                    </ul>
-                  </div>
+                  <h4 class="alert-title">What This Profile Does</h4>
+                  <ul class="alert-message" style="margin: 0; padding-left: 20px;">
+                    ${activeProfile.details.map(item => `<li>${esc(item)}</li>`).join('')}
+                  </ul>
                 </div>
               </div>
             ` : ''}
 
             ${(!canCustomizeRules || !canCustomizeElevation) ? `
-              <div class="alert alert-warning mb-4">
-                <span class="alert-icon">⚠</span>
+              <div class="alert alert-warning mt-4">
+                <div class="alert-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </div>
                 <div class="alert-content">
-                  <div class="alert-title">Profile Locks Are Active</div>
-                  <div class="alert-message">
-                    ${!canCustomizeRules ? 'Advanced filesystem/execution/persistence controls are locked on this profile.' : ''}
-                    ${!canCustomizeElevation ? ' Elevation controls are locked on this profile.' : ''}
-                    ${canCreateCustomProfile ? ' Create a Custom Policy if you want full tuning.' : ''}
-                  </div>
+                  <h4 class="alert-title">Profile Locks Are Active</h4>
+                  <p class="alert-message" style="margin: 0;">
+                    ${!canCustomizeRules ? 'Advanced filesystem/execution controls are locked. ' : ''}
+                    ${!canCustomizeElevation ? 'Elevation controls are locked. ' : ''}
+                    ${canCreateCustomProfile ? 'Create a Custom Policy for full tuning.' : ''}
+                  </p>
                 </div>
               </div>
             ` : ''}
 
-            <div class="btn-group">
-              ${canCreateCustomProfile ? `<button id="policy-create-custom" class="btn btn-ghost btn-sm">Create Custom Policy From Current Settings</button>` : ''}
-            </div>
-
-            <div class="mt-4">
-              <div class="mb-2"><strong>Version:</strong> <span class="mono">${esc(p.version)}</span></div>
-              <div><strong>System Critical Guard:</strong> <span class="chip chip-danger">Always Deny</span></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Network Controls</h3>
-          </div>
-          <div class="card-body">
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="toggle-network-deny" class="form-check-input" ${netRules.default_deny !== false ? 'checked' : ''} ${canCustomizeNetwork ? '' : 'disabled'} />
-                <span class="form-check-label">Network Default Deny</span>
-              </label>
-              <p class="form-hint">Editable on all profiles. When enabled, only allowlisted hosts are permitted.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="toggle-network-post-approval" class="form-check-input" ${netRules.require_approval_for_post !== false ? 'checked' : ''} ${canCustomizeNetwork ? '' : 'disabled'} />
-                <span class="form-check-label">Require approval for POST requests</span>
-              </label>
-              <p class="form-hint">Even allowlisted domains can require approval for POST actions (uploads, form submits, API writes).</p>
-            </div>
-            <button id="policy-save-network" class="btn btn-primary btn-sm" ${canCustomizeNetwork ? '' : 'disabled'}>Save Network Controls</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card mt-5">
-        <div class="card-header">
-          <h3 class="card-title">Domain Allowlist</h3>
-          <p class="card-description">Manage POST and GET host controls with profile-aware safety checks and approval gates.</p>
-        </div>
-        <div class="card-body">
-          <p class="policy-rule-note">Default: all domain entries start unchecked and invert toggles determine whether checked hosts block or allow traffic, while Agent Ruler still enforces the remaining safety controls.</p>
-          <div class="grid grid-2">
-            <div class="domain-column">
-              <h4 class="card-title">POST Domain Rules</h4>
-              <div class="form-group">
-                <label class="form-check mb-3">
-                  <input type="checkbox" id="toggle-invert-allowlist" class="form-check-input" ${netRules.invert_allowlist !== false ? 'checked' : ''} ${canCustomizeDomains ? '' : 'disabled'} />
-                  <span class="form-check-label">Invert (make this a denylist)</span>
-                </label>
+            ${canCreateCustomProfile ? `
+              <div class="settings-row mt-4">
+                <button id="policy-create-custom" class="btn btn-secondary" style="align-self: flex-start;">Create Custom Policy From Current Settings</button>
               </div>
-              <div class="form-group">
-                <label class="form-label">POST Domain List</label>
-                <div id="policy-allowlist-domain-list" class="domain-list" role="list"></div>
-                <div class="domain-add-row mt-3">
-                  <input id="policy-allowlist-add-input" class="form-input" placeholder="Add domain (example: api.openai.com)" ${canCustomizeDomains ? '' : 'disabled'} />
-                  <button id="policy-allowlist-add-btn" class="btn btn-ghost btn-sm" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Add Domain</button>
+            ` : ''}
+            
+          </div>
+        </div>
+
+        <div class="panel-tabs mb-6" id="policy-main-tabs" role="tablist">
+          <button type="button" class="panel-tab active" data-policy-tab="status">Status</button>
+          <button type="button" class="panel-tab" data-policy-tab="network">Network</button>
+          <button type="button" class="panel-tab" data-policy-tab="domains">Domains</button>
+          <button type="button" class="panel-tab" data-policy-tab="elevation">Elevation</button>
+          <button type="button" class="panel-tab" data-policy-tab="advanced">Advanced</button>
+        </div>
+
+        <div id="policy-tab-network" class="settings-section" style="display: none;">
+          <div class="settings-section-header">
+            <h3>Network Controls</h3>
+            <p>Global network restrictions spanning all domains.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="settings-row">
+              <label class="form-switch">
+                <input type="checkbox" id="toggle-network-deny" class="form-switch-input" ${netRules.default_deny !== false ? 'checked' : ''} ${canCustomizeNetwork ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Network Default Deny</span>
+                  <span class="form-switch-description">Editable on all profiles. When enabled, only allowlisted hosts are permitted.</span>
                 </div>
-                <p class="policy-rule-note">POST controls outbound write actions (POST/PUT/PATCH/DELETE, uploads, API writes). Allow only trusted domains and prefer manual human POST actions for sensitive writes.</p>
-              </div>
-              <div class="btn-group domain-actions">
-                <button id="policy-reset-allowlist-defaults" class="btn btn-ghost btn-sm" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Reset Defaults</button>
-                <button id="policy-save-allowlist" class="btn btn-primary btn-sm" ${canCustomizeDomains ? '' : 'disabled'}>Save POST Domain List</button>
-              </div>
+              </label>
             </div>
-            <div class="domain-column">
-              <h4 class="card-title">GET Domain Rules</h4>
-              <div class="form-group">
-                <label class="form-check mb-3">
-                  <input type="checkbox" id="toggle-invert-denylist" class="form-check-input" ${netRules.invert_denylist !== false ? 'checked' : ''} ${canCustomizeDomains ? '' : 'disabled'} />
-                  <span class="form-check-label">Invert (make this a denylist)</span>
-                </label>
-              </div>
-              <div class="form-group">
-                <label class="form-label">GET Domain List</label>
-                <div id="policy-denylist-domain-list" class="domain-list" role="list"></div>
-                <div class="domain-add-row mt-3">
-                  <input id="policy-denylist-add-input" class="form-input" placeholder="Add domain (example: docs.example.com)" ${canCustomizeDomains ? '' : 'disabled'} />
-                  <button id="policy-denylist-add-btn" class="btn btn-ghost btn-sm" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Add Domain</button>
+            <div class="settings-row mt-4">
+              <label class="form-switch">
+                <input type="checkbox" id="toggle-network-post-approval" class="form-switch-input" ${netRules.require_approval_for_post !== false ? 'checked' : ''} ${canCustomizeNetwork ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Require approval for POST requests</span>
+                  <span class="form-switch-description">Even allowlisted domains can require approval for POST actions (uploads, form submits, API writes).</span>
                 </div>
-                <p class="policy-rule-note">GET controls browse/read traffic. If <strong>Invert</strong> is enabled, checked domains are the explicit allow-set; if disabled, checked entries are blocked.</p>
+              </label>
+            </div>
+
+          </div>
+        </div>
+
+        <div id="policy-tab-domains" class="settings-section" style="display: none;">
+          <div class="settings-section-header">
+            <h3>Domain Boundary</h3>
+            <p>Manage discrete domain access. Defaults start unchecked; toggle behavior implies block or allow based on inversion.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="settings-row-split" style="gap: var(--space-8); align-items: flex-start; flex-wrap: wrap;">
+              
+              <!-- POST Domain Rules -->
+              <div class="settings-row" style="flex: 1; min-width: 0;">
+                <h4 style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-4);">POST Form/API Traffic</h4>
+                <div class="settings-row mb-4">
+                  <label class="form-switch">
+                    <input type="checkbox" id="toggle-invert-allowlist" class="form-switch-input" ${netRules.invert_allowlist !== false ? 'checked' : ''} ${canCustomizeDomains ? '' : 'disabled'} />
+                    <div class="form-switch-text">
+                      <span class="form-switch-label">Invert to Denylist</span>
+                    </div>
+                  </label>
+                </div>
+                
+                <div id="policy-allowlist-domain-list" class="domain-list mb-4" role="list"></div>
+                
+                <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-4);">
+                  <input id="policy-allowlist-add-input" class="form-input" placeholder="Add domain (e.g., api.openai.com)" ${canCustomizeDomains ? '' : 'disabled'} />
+                  <button id="policy-allowlist-add-btn" class="btn btn-secondary" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Add</button>
+                </div>
+                
+                <p class="form-hint mb-4">POST controls outbound write actions/uploads.</p>
+                
+                <div style="display: flex; gap: var(--space-2);">
+                  <button id="policy-reset-allowlist-defaults" class="btn btn-sm btn-outline" type="button" ${canCustomizeDomains ? '' : 'disabled'}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 1 0 2.6-6.4L2 9"/></svg> Reset Defaults</button>
+                </div>
               </div>
-              <div class="btn-group domain-actions">
-                <button id="policy-reset-denylist-defaults" class="btn btn-ghost btn-sm" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Reset Defaults</button>
-                <button id="policy-save-denylist" class="btn btn-primary btn-sm" ${canCustomizeDomains ? '' : 'disabled'}>Save GET Domain List</button>
+              
+              <!-- GET Domain Rules -->
+              <div class="settings-row" style="flex: 1; min-width: 0;">
+                <h4 style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-4);">GET Browse Traffic</h4>
+                <div class="settings-row mb-4">
+                  <label class="form-switch">
+                    <input type="checkbox" id="toggle-invert-denylist" class="form-switch-input" ${netRules.invert_denylist !== false ? 'checked' : ''} ${canCustomizeDomains ? '' : 'disabled'} />
+                    <div class="form-switch-text">
+                      <span class="form-switch-label">Invert to Denylist</span>
+                    </div>
+                  </label>
+                </div>
+                
+                <div id="policy-denylist-domain-list" class="domain-list mb-4" role="list"></div>
+                
+                <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-4);">
+                  <input id="policy-denylist-add-input" class="form-input" placeholder="Add domain (e.g., docs.example.com)" ${canCustomizeDomains ? '' : 'disabled'} />
+                  <button id="policy-denylist-add-btn" class="btn btn-secondary" type="button" ${canCustomizeDomains ? '' : 'disabled'}>Add</button>
+                </div>
+                
+                <p class="form-hint mb-4">GET controls standard site browsing/reads.</p>
+                
+                <div style="display: flex; gap: var(--space-2);">
+                  <button id="policy-reset-denylist-defaults" class="btn btn-sm btn-outline" type="button" ${canCustomizeDomains ? '' : 'disabled'}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 1 0 2.6-6.4L2 9"/></svg> Reset Defaults</button>
+                </div>
+              </div>
+              
               </div>
             </div>
           </div>
         </div>
-      </div>
 
-      <div class="card mt-5">
-        <div class="card-header">
-          <h3 class="card-title">Mediated Elevation (sudo mirror)</h3>
+        <div id="policy-tab-elevation" class="settings-section" style="display: none;">
+          <div class="settings-section-header">
+            <h3>Mediated Elevation</h3>
+            <p>Controls how sudo and package manger commands are governed.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="settings-row">
+              <label class="form-switch">
+                <input type="checkbox" id="toggle-elevation-enabled" class="form-switch-input" ${elevationRules.enabled !== false ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Enable mediated elevation</span>
+                  <span class="form-switch-description">Converts <code>sudo apt install</code> requests into approval-gated actions.</span>
+                </div>
+              </label>
+            </div>
+            <div class="settings-row mt-4">
+              <label class="form-switch">
+                <input type="checkbox" id="toggle-elevation-auth" class="form-switch-input" ${elevationRules.require_operator_auth !== false ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Require operator OS auth</span>
+                  <span class="form-switch-description">Keeps host-native authentication in the loop before helper execution.</span>
+                </div>
+              </label>
+            </div>
+            <div class="settings-row mt-4">
+              <label class="form-switch">
+                <input type="checkbox" id="toggle-elevation-use-allowlist" class="form-switch-input" ${elevationUseAllowlist ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Use allowlisted packages</span>
+                  <span class="form-switch-description">When disabled, allowlist is ignored. Denylist is always enforced.</span>
+                </div>
+              </label>
+            </div>
+            
+            <div class="settings-row-split mt-6" style="gap: var(--space-8); align-items: flex-start; border-top: 1px solid var(--content-border); padding-top: var(--space-6);">
+              <div class="settings-row" style="flex: 1; min-width: 0;">
+                <h4 style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-4);">Allowlisted Packages</h4>
+                <div class="settings-row mb-4">
+                  <label class="form-switch">
+                    <input type="checkbox" id="policy-allow-packages-enable-all" class="form-switch-input" ${canCustomizeElevation ? '' : 'disabled'} />
+                    <div class="form-switch-text">
+                      <span class="form-switch-label" style="font-size: 0.9rem;">Enable all</span>
+                    </div>
+                  </label>
+                </div>
+                
+                <div id="policy-allow-package-list" class="domain-list mb-4" style="max-height: 400px; overflow-y: auto;" role="list"></div>
+                
+                <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-4);">
+                  <select id="policy-allow-package-manager" class="form-select" style="width: auto;" ${canCustomizeElevation ? '' : 'disabled'}>
+                    <option value="apt">apt</option>
+                    <option value="pip">pip</option>
+                    <option value="npm">npm</option>
+                    <option value="cargo">cargo</option>
+                    <option value="custom">custom</option>
+                  </select>
+                  <input id="policy-allow-package-input" class="form-input" style="flex: 1;" placeholder="e.g., git" ${canCustomizeElevation ? '' : 'disabled'} />
+                  <button id="policy-allow-package-add-btn" class="btn btn-secondary" type="button" ${canCustomizeElevation ? '' : 'disabled'}>Add</button>
+                </div>
+              </div>
+              
+              <div class="settings-row" style="flex: 1; min-width: 0;">
+                <h4 style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-4);">Denylisted Packages</h4>
+                <div class="settings-row mb-4">
+                  <label class="form-switch">
+                    <input type="checkbox" id="policy-deny-packages-enable-all" class="form-switch-input" ${canCustomizeElevation ? '' : 'disabled'} />
+                    <div class="form-switch-text">
+                      <span class="form-switch-label" style="font-size: 0.9rem;">Enable all</span>
+                    </div>
+                  </label>
+                </div>
+                
+                <div id="policy-deny-package-list" class="domain-list mb-4" style="max-height: 400px; overflow-y: auto;" role="list"></div>
+                
+                <div style="display: flex; gap: var(--space-2); margin-bottom: var(--space-4);">
+                  <select id="policy-deny-package-manager" class="form-select" style="width: auto;" ${canCustomizeElevation ? '' : 'disabled'}>
+                    <option value="apt">apt</option>
+                    <option value="pip">pip</option>
+                    <option value="npm">npm</option>
+                    <option value="cargo">cargo</option>
+                    <option value="custom">custom</option>
+                  </select>
+                  <input id="policy-deny-package-input" class="form-input" style="flex: 1;" placeholder="e.g., openssh-server" ${canCustomizeElevation ? '' : 'disabled'} />
+                  <button id="policy-deny-package-add-btn" class="btn btn-secondary" type="button" ${canCustomizeElevation ? '' : 'disabled'}>Add</button>
+                </div>
+                <p class="form-hint" style="margin-top: 0;">Denylist always wins. Enable packages you do not plan to use, and disable entries before using them intentionally.</p>
+              </div>
+            </div>
+
+          </div>
         </div>
-        <div class="card-body">
-          <div class="form-group">
-              <label class="form-check">
-              <input type="checkbox" id="toggle-elevation-enabled" class="form-check-input" ${elevationRules.enabled !== false ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
-                <span class="form-check-label">Enable mediated elevation for install_packages</span>
-              </label>
-            <p class="form-hint">When enabled, <code>sudo apt install ...</code> requests are converted into approval-gated structured actions.</p>
+
+        <div id="policy-tab-advanced" class="settings-section" style="display: none;">
+          <div class="settings-section-header">
+            <h3>Advanced Rules</h3>
+            <p>Tunable paths and execution layers for Nerd / Custom profiles.</p>
           </div>
-          <div class="form-group">
-              <label class="form-check">
-              <input type="checkbox" id="toggle-elevation-auth" class="form-check-input" ${elevationRules.require_operator_auth !== false ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
-                <span class="form-check-label">Require operator OS authentication</span>
-              </label>
-            <p class="form-hint">Keeps host-native authentication in the loop before privileged helper execution.</p>
-          </div>
-          <div class="form-group">
-              <label class="form-check">
-              <input type="checkbox" id="toggle-elevation-use-allowlist" class="form-check-input" ${elevationUseAllowlist ? 'checked' : ''} ${canCustomizeElevation ? '' : 'disabled'} />
-                <span class="form-check-label">Use allowlisted packages</span>
-              </label>
-            <p class="form-hint">When disabled, allowlist is ignored. Denylist is always enforced.</p>
-          </div>
-          <div class="grid grid-2">
-            <div class="form-group">
-              <label class="form-label">Allowlisted Packages</label>
-              <label class="form-check mb-3">
-                <input type="checkbox" id="policy-allow-packages-enable-all" class="form-check-input" ${canCustomizeElevation ? '' : 'disabled'} />
-                <span class="form-check-label">Enable all packages</span>
-              </label>
-              <div id="policy-allow-package-list" class="domain-list" role="list"></div>
-              <div class="domain-add-row mt-3">
-                <select id="policy-allow-package-manager" class="form-select" ${canCustomizeElevation ? '' : 'disabled'}>
-                  <option value="apt">apt</option>
-                  <option value="pip">pip</option>
-                  <option value="npm">npm</option>
-                  <option value="cargo">cargo</option>
-                  <option value="custom">custom</option>
+          <div class="settings-section-content">
+            <div class="settings-row-split" style="gap: var(--space-6);">
+              <div class="settings-row" style="flex:1;">
+                <label class="form-label">Workspace Rule</label>
+                <select id="policy-fs-workspace" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
+                  <option value="allow" ${fsRules.workspace === 'allow' ? 'selected' : ''}>Allow</option>
+                  <option value="approval" ${fsRules.workspace === 'approval' ? 'selected' : ''}>Approval</option>
+                  <option value="deny" ${fsRules.workspace === 'deny' ? 'selected' : ''}>Deny</option>
                 </select>
-                <input id="policy-allow-package-input" class="form-input" placeholder="Add package (example: git)" ${canCustomizeElevation ? '' : 'disabled'} />
-                <button id="policy-allow-package-add-btn" class="btn btn-ghost btn-sm" type="button" ${canCustomizeElevation ? '' : 'disabled'}>Add Package</button>
               </div>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Denylisted Packages</label>
-              <label class="form-check mb-3">
-                <input type="checkbox" id="policy-deny-packages-enable-all" class="form-check-input" ${canCustomizeElevation ? '' : 'disabled'} />
-                <span class="form-check-label">Enable all packages</span>
-              </label>
-              <div id="policy-deny-package-list" class="domain-list" role="list"></div>
-              <div class="domain-add-row mt-3">
-                <select id="policy-deny-package-manager" class="form-select" ${canCustomizeElevation ? '' : 'disabled'}>
-                  <option value="apt">apt</option>
-                  <option value="pip">pip</option>
-                  <option value="npm">npm</option>
-                  <option value="cargo">cargo</option>
-                  <option value="custom">custom</option>
+              <div class="settings-row" style="flex:1;">
+                <label class="form-label">User Data Rule</label>
+                <select id="policy-fs-user-data" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
+                  <option value="allow" ${fsRules.user_data === 'allow' ? 'selected' : ''}>Allow</option>
+                  <option value="approval" ${fsRules.user_data === 'approval' ? 'selected' : ''}>Approval</option>
+                  <option value="deny" ${fsRules.user_data === 'deny' ? 'selected' : ''}>Deny</option>
                 </select>
-                <input id="policy-deny-package-input" class="form-input" placeholder="Add package (example: openssh-server)" ${canCustomizeElevation ? '' : 'disabled'} />
-                <button id="policy-deny-package-add-btn" class="btn btn-ghost btn-sm" type="button" ${canCustomizeElevation ? '' : 'disabled'}>Add Package</button>
               </div>
-              <p class="form-hint">Denylist always wins. Enable packages you do not plan to use, and disable entries before using them intentionally.</p>
             </div>
-          </div>
-          <button id="policy-save-elevation" class="btn btn-primary btn-sm" ${canCustomizeElevation ? '' : 'disabled'}>Save Elevation Controls</button>
-        </div>
-      </div>
+            
+            <div class="settings-row-split mt-4" style="gap: var(--space-6);">
+              <div class="settings-row" style="flex:1;">
+                <label class="form-label">Shared Zone Rule</label>
+                <select id="policy-fs-shared" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
+                  <option value="allow" ${fsRules.shared === 'allow' ? 'selected' : ''}>Allow</option>
+                  <option value="approval" ${fsRules.shared === 'approval' ? 'selected' : ''}>Approval</option>
+                  <option value="deny" ${fsRules.shared === 'deny' ? 'selected' : ''}>Deny</option>
+                </select>
+              </div>
+              <div class="settings-row" style="flex:1;">
+                <label class="form-label">Secrets Rule</label>
+                <select id="policy-fs-secrets" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
+                  <option value="allow" ${fsRules.secrets === 'allow' ? 'selected' : ''}>Allow</option>
+                  <option value="approval" ${fsRules.secrets === 'approval' ? 'selected' : ''}>Approval</option>
+                  <option value="deny" ${fsRules.secrets === 'deny' ? 'selected' : ''}>Deny</option>
+                </select>
+              </div>
+            </div>
+            
+            <div class="settings-row mt-6">
+              <label class="form-switch">
+                <input type="checkbox" id="policy-exec-workspace" class="form-switch-input" ${execRules.deny_workspace_exec !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Deny Execution From Workspace</span>
+                </div>
+              </label>
+            </div>
+            <div class="settings-row mt-3">
+              <label class="form-switch">
+                <input type="checkbox" id="policy-exec-tmp" class="form-switch-input" ${execRules.deny_tmp_exec !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Deny Execution From Temp Paths</span>
+                </div>
+              </label>
+            </div>
+            <div class="settings-row mt-3">
+              <label class="form-switch">
+                <input type="checkbox" id="policy-exec-quarantine" class="form-switch-input" ${execRules.quarantine_on_download_exec_chain !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Quarantine Download->Exec Chains</span>
+                </div>
+              </label>
+            </div>
+            <div class="settings-row mt-3">
+              <label class="form-switch">
+                <input type="checkbox" id="policy-persistence-autostart" class="form-switch-input" ${persistRules.deny_autostart !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label">Deny Autostart Persistence</span>
+                </div>
+              </label>
+            </div>
+            
+            <div class="settings-row-split mt-6">
+              <div class="settings-row">
+                <label class="form-label">Mass Delete Threshold</label>
+                <input id="policy-mass-delete-threshold" type="number" min="1" class="form-input" style="max-width: 150px;" value="${massDeleteThreshold}" ${canCustomizeRules ? '' : 'disabled'} />
+                <p class="form-hint">Number of files in a single delete operation that triggers an approval requirement.</p>
+              </div>
+            </div>
+            
 
-      <div class="card mt-5">
-        <div class="card-header">
-          <div>
-            <h3 class="card-title">Advanced Rule Customization</h3>
-            <p class="card-description">Editable in Coding/Nerd, I DON'T CARE, and Custom profiles.</p>
           </div>
         </div>
-        <div class="card-body">
-          <div class="grid grid-2">
-            <div class="form-group">
-              <label class="form-label">Workspace Rule</label>
-              <select id="policy-fs-workspace" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
-                <option value="allow" ${fsRules.workspace === 'allow' ? 'selected' : ''}>Allow</option>
-                <option value="approval" ${fsRules.workspace === 'approval' ? 'selected' : ''}>Approval</option>
-                <option value="deny" ${fsRules.workspace === 'deny' ? 'selected' : ''}>Deny</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">User Data Rule</label>
-              <select id="policy-fs-user-data" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
-                <option value="allow" ${fsRules.user_data === 'allow' ? 'selected' : ''}>Allow</option>
-                <option value="approval" ${fsRules.user_data === 'approval' ? 'selected' : ''}>Approval</option>
-                <option value="deny" ${fsRules.user_data === 'deny' ? 'selected' : ''}>Deny</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Shared Zone Rule</label>
-              <select id="policy-fs-shared" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
-                <option value="allow" ${fsRules.shared === 'allow' ? 'selected' : ''}>Allow</option>
-                <option value="approval" ${fsRules.shared === 'approval' ? 'selected' : ''}>Approval</option>
-                <option value="deny" ${fsRules.shared === 'deny' ? 'selected' : ''}>Deny</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Secrets Rule</label>
-              <select id="policy-fs-secrets" class="form-select" ${canCustomizeRules ? '' : 'disabled'}>
-                <option value="allow" ${fsRules.secrets === 'allow' ? 'selected' : ''}>Allow</option>
-                <option value="approval" ${fsRules.secrets === 'approval' ? 'selected' : ''}>Approval</option>
-                <option value="deny" ${fsRules.secrets === 'deny' ? 'selected' : ''}>Deny</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="policy-exec-workspace" class="form-check-input" ${execRules.deny_workspace_exec !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
-                <span class="form-check-label">Deny Execution From Workspace</span>
-              </label>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="policy-exec-tmp" class="form-check-input" ${execRules.deny_tmp_exec !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
-                <span class="form-check-label">Deny Execution From Temp Paths</span>
-              </label>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="policy-exec-quarantine" class="form-check-input" ${execRules.quarantine_on_download_exec_chain !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
-                <span class="form-check-label">Quarantine Download->Exec Chains</span>
-              </label>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="policy-persistence-autostart" class="form-check-input" ${persistRules.deny_autostart !== false ? 'checked' : ''} ${canCustomizeRules ? '' : 'disabled'} />
-                <span class="form-check-label">Deny Autostart Persistence</span>
-              </label>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Mass Delete Threshold</label>
-              <input id="policy-mass-delete-threshold" type="number" min="1" class="form-input" value="${massDeleteThreshold}" ${canCustomizeRules ? '' : 'disabled'} />
-              <p class="form-hint">Represents the number of files in a single delete operation that triggers an approval requirement.</p>
-            </div>
-          </div>
-          <button id="policy-save-rules" class="btn btn-secondary btn-sm" ${canCustomizeRules ? '' : 'disabled'}>Save Advanced Rules</button>
-        </div>
-      </div>
 
-      <div class="card mt-5">
-        <div class="card-header">
-          <h3 class="card-title">Current Zone Configuration</h3>
-        </div>
-        <div class="card-body">
-          <div class="table-container">
-            <table class="table">
-              <thead>
-                <tr>
-                  <th>Zone</th>
-                  <th>Name</th>
-                  <th>Active Rule</th>
-                  <th>Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><span class="chip chip-success">0</span></td>
-                  <td>Workspace</td>
-                  <td>${esc(dispLabel(fsRules.workspace))}</td>
-                  <td>Agent working directory.</td>
-                </tr>
-                <tr>
-                  <td><span class="chip chip-primary">1</span></td>
-                  <td>User Data</td>
-                  <td>${esc(dispLabel(fsRules.user_data))}</td>
-                  <td>User documents and app config.</td>
-                </tr>
-                <tr>
-                  <td><span class="chip chip-warning">2</span></td>
-                  <td>Shared Zone</td>
-                  <td>${esc(dispLabel(fsRules.shared))}</td>
-                  <td>Export staging and approval boundary.</td>
-                </tr>
-                <tr>
-                  <td><span class="chip chip-danger">3</span></td>
-                  <td>System Critical</td>
-                  <td><strong>Deny (Enforced)</strong></td>
-                  <td>System binaries and host-critical configuration.</td>
-                </tr>
-                <tr>
-                  <td><span class="chip chip-danger">4</span></td>
-                  <td>Secrets</td>
-                  <td>${esc(dispLabel(fsRules.secrets))}</td>
-                  <td>Credentials, keys, and sensitive material.</td>
-                </tr>
-              </tbody>
-            </table>
+        <div id="policy-tab-status" class="settings-section">
+          <div class="settings-section-header">
+            <h3>Active Boundaries</h3>
+            <p>Summary of zone states.</p>
+          </div>
+          <div class="settings-section-content">
+            <div class="table-container" style="border: 1px solid var(--content-border); border-radius: var(--radius-lg); overflow: hidden;">
+              <table class="table" style="margin: 0; border: none;">
+                <thead>
+                  <tr>
+                    <th>Zone</th>
+                    <th>Name</th>
+                    <th>Active Rule</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody style="border-top: 1px solid var(--content-border);">
+                  <tr>
+                    <td><span class="chip chip-success">0</span></td>
+                    <td style="font-weight: 500;">Workspace</td>
+                    <td><span class="chip" style="background: var(--content-bg-alt);">${esc(dispLabel(fsRules.workspace))}</span></td>
+                    <td class="text-muted">Agent working directory.</td>
+                  </tr>
+                  <tr>
+                    <td><span class="chip chip-primary">1</span></td>
+                    <td style="font-weight: 500;">User Data</td>
+                    <td><span class="chip" style="background: var(--content-bg-alt);">${esc(dispLabel(fsRules.user_data))}</span></td>
+                    <td class="text-muted">User documents and app config.</td>
+                  </tr>
+                  <tr>
+                    <td><span class="chip chip-warning">2</span></td>
+                    <td style="font-weight: 500;">Shared Zone</td>
+                    <td><span class="chip" style="background: var(--content-bg-alt);">${esc(dispLabel(fsRules.shared))}</span></td>
+                    <td class="text-muted">Export staging and approval boundary.</td>
+                  </tr>
+                  <tr style="background: var(--danger-bg);">
+                    <td><span class="chip chip-danger" style="font-weight: 600;">3</span></td>
+                    <td><strong style="color: var(--danger);">System Critical</strong></td>
+                    <td><span class="chip chip-danger" style="font-weight: 600;">Deny (Enforced)</span></td>
+                    <td class="text-muted">System binaries and host-critical config.</td>
+                  </tr>
+                  <tr>
+                    <td><span class="chip chip-danger" style="font-weight: 600;">4</span></td>
+                    <td style="font-weight: 500;">Secrets</td>
+                    <td><span class="chip" style="background: var(--content-bg-alt);">${esc(dispLabel(fsRules.secrets))}</span></td>
+                    <td class="text-muted">Credentials, keys, and sensitive material.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -614,6 +684,20 @@
       syncPackageBulkToggle('policy-deny-packages-enable-all', denyPackageRows);
     };
     renderPackageLists();
+
+    const tabs = document.querySelectorAll('[data-policy-tab]');
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        const target = tab.getAttribute('data-policy-tab');
+        ['profile', 'network', 'domains', 'elevation', 'advanced', 'status'].forEach(id => {
+           const el = document.getElementById('policy-tab-' + id);
+           if (el) el.style.display = (id === target) ? '' : 'none';
+        });
+      });
+    });
+
 
     document.getElementById('policy-profile').addEventListener('change', async (e) => {
       try {
@@ -835,136 +919,109 @@
     setupAddPackageHandler('policy-allow-package-input', 'policy-allow-package-manager', 'policy-allow-package-add-btn', allowPackageRows, 'policy-allow-package-list', 'allow-packages', 'policy-allow-packages-enable-all');
     setupAddPackageHandler('policy-deny-package-input', 'policy-deny-package-manager', 'policy-deny-package-add-btn', denyPackageRows, 'policy-deny-package-list', 'deny-packages', 'policy-deny-packages-enable-all');
 
-    // Save basic network controls
-    document.getElementById('policy-save-network').addEventListener('click', async () => {
-      try {
-        const updated = await api('/api/policy/toggles', {
-          method: 'POST',
-          body: {
+
+    // Single Global Save Action
+    const saveBtn = document.getElementById('policy-save-all');
+    const resetBtn = document.getElementById('policy-reset-all');
+
+    const trackChanges = () => {
+      if (!saveBtn || !resetBtn) return;
+      saveBtn.disabled = false;
+      resetBtn.style.display = 'inline-flex';
+    };
+
+    root.addEventListener('change', (e) => {
+      const target = e.target;
+      if (target.closest('#policy-main-tabs') || target.id === 'policy-profile') return;
+      trackChanges();
+    });
+    
+    root.addEventListener('input', (e) => {
+      if (e.target.matches('input[type="text"], input[type="number"], input[type="search"]')) {
+        trackChanges();
+      }
+    });
+
+    root.addEventListener('click', (e) => {
+      const target = e.target;
+      const idsTriggers = [
+        'policy-allowlist-add-btn', 'policy-denylist-add-btn',
+        'policy-allow-package-add-btn', 'policy-deny-package-add-btn',
+        'policy-reset-allowlist-defaults', 'policy-reset-denylist-defaults'
+      ];
+      if (target.closest('.domain-remove') || target.closest('.package-remove') || idsTriggers.includes(target.id)) {
+        trackChanges();
+      }
+    });
+
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        renderPolicy(root);
+      });
+    }
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        try {
+          saveBtn.disabled = true;
+          const origText = saveBtn.innerHTML;
+          saveBtn.textContent = 'Saving...';
+
+          const allowlistHosts = allowlistRows.filter(item => item.enabled).map(item => item.host);
+          const denylistHosts = denylistRows.filter(item => item.enabled).map(item => item.host);
+          
+          const collectEnabledPackages = (rows) => {
+            const packages = [];
+            const seen = new Set();
+            rows.forEach((entry) => {
+              if (!entry.enabled) return;
+              const pkg = normalizePackageName(entry.packageName);
+              if (!pkg || seen.has(pkg)) return;
+              seen.add(pkg);
+              packages.push(pkg);
+            });
+            return packages;
+          };
+
+          const body = {
             network_default_deny: document.getElementById('toggle-network-deny').checked,
-            network_require_approval_for_post: document.getElementById('toggle-network-post-approval').checked
-          }
-        });
-        state.policy = updated;
-        toast('Network controls updated', 'success');
-        await refreshStatus();
-        await renderPolicy(root);
-      } catch (err) {
-        toast(`Failed to update network controls: ${err.message}`, 'error');
-      }
-    });
-
-    // Save allowlist (POST domains)
-    document.getElementById('policy-save-allowlist').addEventListener('click', async () => {
-      try {
-        const allowlistHosts = allowlistRows
-          .filter(item => item.enabled)
-          .map(item => item.host);
-
-        const updated = await api('/api/policy/toggles', {
-          method: 'POST',
-          body: {
+            network_require_approval_for_post: document.getElementById('toggle-network-post-approval').checked,
             network_allowlist_hosts: allowlistHosts,
-            network_invert_allowlist: document.getElementById('toggle-invert-allowlist').checked
-          }
-        });
-        state.policy = updated;
-        toast('POST domain list updated', 'success');
-        await refreshStatus();
-        await renderPolicy(root);
-      } catch (err) {
-        toast(`Failed to update POST domain list: ${err.message}`, 'error');
-      }
-    });
-
-    // Save denylist (GET domains)
-    document.getElementById('policy-save-denylist').addEventListener('click', async () => {
-      try {
-        const denylistHosts = denylistRows
-          .filter(item => item.enabled)
-          .map(item => item.host);
-
-        const updated = await api('/api/policy/toggles', {
-          method: 'POST',
-          body: {
+            network_invert_allowlist: document.getElementById('toggle-invert-allowlist').checked,
             network_denylist_hosts: denylistHosts,
-            network_invert_denylist: document.getElementById('toggle-invert-denylist').checked
-          }
-        });
-        state.policy = updated;
-        toast('GET domain list updated', 'success');
-        await refreshStatus();
-        await renderPolicy(root);
-      } catch (err) {
-        toast(`Failed to update GET domain list: ${err.message}`, 'error');
-      }
-    });
-
-    document.getElementById('policy-save-elevation').addEventListener('click', async () => {
-      try {
-        const collectEnabledPackages = (rows) => {
-          const packages = [];
-          const seen = new Set();
-          rows.forEach((entry) => {
-            if (!entry.enabled) return;
-            const pkg = normalizePackageName(entry.packageName);
-            if (!pkg || seen.has(pkg)) return;
-            seen.add(pkg);
-            packages.push(pkg);
-          });
-          return packages;
-        };
-        const allowedPackages = collectEnabledPackages(allowPackageRows);
-        const deniedPackages = collectEnabledPackages(denyPackageRows);
-
-        const updated = await api('/api/policy/toggles', {
-          method: 'POST',
-          body: {
+            network_invert_denylist: document.getElementById('toggle-invert-denylist').checked,
+            
             elevation_enabled: document.getElementById('toggle-elevation-enabled').checked,
             elevation_require_operator_auth: document.getElementById('toggle-elevation-auth').checked,
             elevation_use_allowlist: document.getElementById('toggle-elevation-use-allowlist').checked,
-            elevation_allowed_packages: allowedPackages,
-            elevation_denied_packages: deniedPackages
-          }
-        });
-        state.policy = updated;
-        toast('Elevation controls updated', 'success');
-        await refreshStatus();
-        await renderPolicy(root);
-      } catch (err) {
-        toast(`Failed to update elevation controls: ${err.message}`, 'error');
-      }
-    });
+            elevation_allowed_packages: collectEnabledPackages(allowPackageRows),
+            elevation_denied_packages: collectEnabledPackages(denyPackageRows),
+            
+            fs_workspace: document.getElementById('policy-fs-workspace').value,
+            fs_user_data: document.getElementById('policy-fs-user-data').value,
+            fs_shared: document.getElementById('policy-fs-shared').value,
+            fs_secrets: document.getElementById('policy-fs-secrets').value,
+            deny_workspace_exec: document.getElementById('policy-exec-workspace').checked,
+            deny_tmp_exec: document.getElementById('policy-exec-tmp').checked,
+            quarantine_on_download_exec_chain: document.getElementById('policy-exec-quarantine').checked,
+            deny_autostart: document.getElementById('policy-persistence-autostart').checked,
+            mass_delete_threshold: Number(document.getElementById('policy-mass-delete-threshold').value) || 40
+          };
 
-    document.getElementById('policy-save-rules').addEventListener('click', async () => {
-      try {
-        const massDeleteThresholdInput = document.getElementById('policy-mass-delete-threshold')?.value;
-        const payload = {
-          filesystem_workspace: document.getElementById('policy-fs-workspace').value,
-          filesystem_user_data: document.getElementById('policy-fs-user-data').value,
-          filesystem_shared: document.getElementById('policy-fs-shared').value,
-          filesystem_secrets: document.getElementById('policy-fs-secrets').value,
-          execution_deny_workspace_exec: document.getElementById('policy-exec-workspace').checked,
-          execution_deny_tmp_exec: document.getElementById('policy-exec-tmp').checked,
-          execution_quarantine_on_download_exec_chain: document.getElementById('policy-exec-quarantine').checked,
-          persistence_deny_autostart: document.getElementById('policy-persistence-autostart').checked,
-          safeguards_mass_delete_threshold: toSafePositiveInt(massDeleteThresholdInput, 40)
-        };
+          const updated = await api('/api/policy/toggles', {
+            method: 'POST',
+            body
+          });
+          state.policy = updated;
+          toast('Configuration saved', 'success');
+          await refreshStatus();
+          await renderPolicy(root);
+        } catch (err) {
+          toast(`Failed to save policy: ${err.message}`, 'error');
+          saveBtn.disabled = false;
+          saveBtn.innerHTML = origText;
+        }
+      });
+    }
+  } // end renderPolicy
 
-        const updated = await api('/api/policy/toggles', {
-          method: 'POST',
-          body: payload
-        });
-        state.policy = updated;
-        toast('Advanced policy rules updated', 'success');
-        await refreshStatus();
-        await renderPolicy(root);
-      } catch (err) {
-        toast(`Failed to update advanced rules: ${err.message}`, 'error');
-      }
-    });
-  }
-
-  // ============================================
-  // Receipts Page
-  // ============================================

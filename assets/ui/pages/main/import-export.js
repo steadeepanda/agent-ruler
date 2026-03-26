@@ -100,28 +100,27 @@
 
     container.classList.add('zone-browser-host');
     container.innerHTML = `
-      <div class="zone-browser" data-zone="${zoneKind}">
-        <div class="zone-browser-header">
-          <div>
-            <div class="zone-browser-title">${title}</div>
-            <span class="chip zone-browser-chip">${chipLabel}</span>
+      <div class="zone-browser" data-zone="${zoneKind}" style="display: flex; flex-direction: column; width: 100%; height: 100%; background: var(--content-bg);">
+        
+        <div class="zone-browser-header" style="padding: var(--space-3); border-bottom: 1px solid var(--content-border); background: var(--content-bg-alt);">
+          <div class="zone-browser-header-actions" style="display: flex; justify-content: flex-end; gap: var(--space-2); margin-bottom: var(--space-2);">
+            <button type="button" class="btn btn-sm btn-outline" data-action="up"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;"><path d="M12 19V5M5 12l7-7 7 7"/></svg> Up</button>
+            <button type="button" class="btn btn-sm btn-outline" data-action="refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px;"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 1 0 2.6-6.4L2 9"/></svg> Refresh</button>
           </div>
-          <div class="zone-browser-header-actions">
-            <button type="button" class="btn btn-ghost btn-sm" data-action="refresh">Refresh</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="up">Up</button>
-          </div>
+          <div class="zone-browser-breadcrumb mono" data-browser-breadcrumb style="display: block; width: 100%; margin: 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--content-border); border-radius: var(--radius); background: var(--content-bg); text-align: left; overflow-x: auto; white-space: nowrap; font-size: 0.85rem; color: var(--text-primary);"></div>
         </div>
-        <div class="zone-browser-breadcrumb" data-browser-breadcrumb></div>
-        <div class="zone-browser-selection-controls" data-selection-controls>
-          <label class="form-check">
+
+        <div class="zone-browser-selection-controls" data-selection-controls style="padding: var(--space-2) var(--space-4); background: var(--hover-bg); border-bottom: 1px solid var(--content-border); display: flex; align-items: center; gap: var(--space-4);">
+          <label class="form-check" style="margin: 0;">
             <input type="checkbox" class="form-check-input" data-action="select-all" />
             <span class="form-check-label">Select All</span>
           </label>
-          <span class="zone-browser-selection-count" data-selection-count>0 selected</span>
-          <button type="button" class="btn btn-ghost btn-sm" data-action="clear-selection">Clear</button>
+          <span class="zone-browser-selection-count" data-selection-count style="color: var(--text-muted); font-size: 0.85rem; margin-right: auto; padding-left: 10px;">0 selected</span>
+          <button type="button" class="btn btn-sm btn-outline" data-action="clear-selection">Clear</button>
         </div>
+
         <div class="zone-browser-status" data-browser-status></div>
-        <div class="zone-browser-list" data-browser-list role="list"></div>
+        <div class="zone-browser-list" data-browser-list role="list" style="flex: 1; overflow-y: auto; padding: var(--space-2);"></div>
         <div class="zone-browser-drop-hint">Drag items here to ${zoneKind === 'shared' ? 'stage them' : zoneKind === 'deliver' ? 'deliver them' : 'explore'}.</div>
       </div>
     `;
@@ -613,109 +612,114 @@
     const runnerOptions = runnerFilterOptions().filter((option) => option.id !== 'all');
 
     root.innerHTML = `
-      <div class="card mb-5">
-        <div class="card-header">
-          <div>
-            <h3 class="card-title">Import / Export Flow</h3>
-            <p class="card-description">Transfer files between zones with approval gates</p>
-          </div>
-          <div class="btn-group">
-            <button id="btn-import" class="btn btn-primary">Import</button>
-            <button id="btn-stage" class="btn btn-secondary">Stage</button>
-            <button id="btn-deliver" class="btn btn-warning">Deliver</button>
-          </div>
+      <div class="settings-container" style="max-width: 1400px; padding: 0 var(--space-4);">
+        <div class="settings-header" style="margin-bottom: var(--space-6); padding-bottom: var(--space-6); border-bottom: 1px solid var(--content-border);">
+          <h2 class="settings-title">Import / Export Data</h2>
+          <p class="settings-description">Transfer files across isolation boundaries and manage external deliveries.</p>
         </div>
-        <div class="card-body">
-        <div class="form-group">
-          <label class="form-label">Runner Context</label>
-          <select id="files-runner-context" class="form-select">
-            ${runnerOptions.map((option) => `
-              <option value="${esc(option.id)}" ${selectedRunner === option.id ? 'selected' : ''}>${esc(option.label)}</option>
-            `).join('')}
-          </select>
-          <p class="form-hint">Import / Export workspace explorer follows this runner's managed Zone 0 path.</p>
-        </div>
-        <div class="grid grid-2">
-          <div>
-            <label class="form-label">Action Source</label>
-            <select id="flow-source" class="form-select">
-              <option value="user" ${source === 'user' ? 'selected' : ''}>User (auto-approve)</option>
-              <option value="agent" ${source === 'agent' ? 'selected' : ''}>Agent (approval queue)</option>
-            </select>
-            <p class="form-hint">User mode skips approval queue for manual Control Panel actions.</p>
-          </div>
-          <div>
-            <label class="form-label">Preview Mode</label>
-            <select id="preview-mode" class="form-select">
-              <option value="always" ${preview === 'always' ? 'selected' : ''}>Always preview</option>
-              <option value="auto" ${preview === 'auto' ? 'selected' : ''}>Auto (preview for agent)</option>
-              <option value="off" ${preview === 'off' ? 'selected' : ''}>Skip preview</option>
-            </select>
-          </div>
-        </div>
-        <div
-          id="drag-drop-auto-approve-row"
-          class="form-group ${source === 'user' ? '' : 'hidden'}"
-        >
-          <label class="form-check">
-            <input
-              type="checkbox"
-              id="drag-drop-auto-approve"
-              class="form-check-input"
-              ${dragDropAutoApprove ? 'checked' : ''}
-            />
-            <span class="form-check-label">Auto-approve drag/drop transfers (user-only)</span>
-          </label>
-          <p class="form-hint">
-            Checked by default for User-sourced actions. Drag/drop is unavailable when this card is in Agent mode.
-          </p>
-        </div>
-      </div>
-    </div>
 
-      <div class="alert alert-info mb-4">
-        <span class="alert-icon">ℹ</span>
-        <div class="alert-content">
-          <div class="alert-title">Zone explorer tip</div>
-          <div class="alert-message">
-            Scroll inside each zone browser to inspect nested directories and manage zone transfers.
+        <div style="background: var(--content-bg); border: 1px solid var(--content-border); border-radius: var(--radius-lg); padding: var(--space-4); margin-bottom: var(--space-6);">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: var(--space-4);">
+            <div>
+              <h3 style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary); margin: 0 0 var(--space-1) 0;">Transfer Flow</h3>
+              <p style="font-size: 0.9rem; color: var(--text-muted); margin: 0;">Configure how files move between zones.</p>
+            </div>
+            <div class="btn-group" style="display: flex; gap: var(--space-2);">
+              <button id="btn-import" class="btn btn-primary btn-sm">Import</button>
+              <button id="btn-stage" class="btn btn-secondary btn-sm">Stage</button>
+              <button id="btn-deliver" class="btn btn-secondary btn-sm">Deliver</button>
+            </div>
+          </div>
+          
+          <div style="display: flex; gap: var(--space-6); flex-wrap: wrap;">
+            <div class="form-group" style="flex: 1; min-width: 200px; margin: 0;">
+              <label class="form-label">Runner Context</label>
+              <select id="files-runner-context" class="form-select">
+                ${runnerOptions.map((option) => `
+                  <option value="${esc(option.id)}" ${selectedRunner === option.id ? 'selected' : ''}>${esc(option.label)}</option>
+                `).join('')}
+              </select>
+            </div>
+            <div class="form-group" style="flex: 1; min-width: 200px; margin: 0;">
+              <label class="form-label">Action Source</label>
+              <select id="flow-source" class="form-select">
+                <option value="user" ${source === 'user' ? 'selected' : ''}>User (auto-approve)</option>
+                <option value="agent" ${source === 'agent' ? 'selected' : ''}>Agent (approval queue)</option>
+              </select>
+            </div>
+            <div class="form-group" style="flex: 1; min-width: 200px; margin: 0;">
+              <label class="form-label">Preview Mode</label>
+              <select id="preview-mode" class="form-select">
+                <option value="always" ${preview === 'always' ? 'selected' : ''}>Always preview</option>
+                <option value="auto" ${preview === 'auto' ? 'selected' : ''}>Auto (preview for agent)</option>
+                <option value="off" ${preview === 'off' ? 'selected' : ''}>Skip preview</option>
+              </select>
+            </div>
+          </div>
+          
+          <div id="drag-drop-auto-approve-row" class="mt-4 ${source === 'user' ? '' : 'hidden'}" style="padding-top: var(--space-4); border-top: 1px dashed var(--content-border);">
+            <label class="form-switch">
+              <input type="checkbox" id="drag-drop-auto-approve" class="form-switch-input" ${dragDropAutoApprove ? 'checked' : ''} />
+              <div class="form-switch-text">
+                <span class="form-switch-label">Auto-approve drag/drop transfers (user-only)</span>
+                <span class="form-switch-description">Drag/drop is unavailable when Action Source is set to Agent.</span>
+              </div>
+            </label>
           </div>
         </div>
-      </div>
 
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Workspace</h3>
-            <span class="chip chip-success">Zone 0</span>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">Agent working directory with full read/write access.</p>
-            <p id="zone-path-workspace" class="form-hint mono">-</p>
-            <div id="zone-browser-workspace" class="mt-4"></div>
+        <div style="background: var(--info-bg); border: 1px solid var(--info-border); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-6); display: flex; gap: var(--space-3); align-items: flex-start;">
+          <div style="color: var(--info); font-size: 1.2rem;">ℹ</div>
+          <div>
+            <div style="font-weight: 600; font-size: 0.9rem; color: var(--info);">Zone explorer tip</div>
+            <div style="font-size: 0.85rem; color: var(--text-primary); margin-top: 2px;">Scroll inside each zone browser to inspect nested directories. Drag and drop to quickly stage or deliver.</div>
           </div>
         </div>
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Shared Zone</h3>
-            <span class="chip chip-warning">Zone 2</span>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--space-6); padding-bottom: var(--space-8);">
+          
+          <div style="display: flex; flex-direction: column; border: 1px solid var(--content-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--content-bg);">
+            <div style="padding: var(--space-4); border-bottom: 1px solid var(--content-border); background: var(--content-bg-alt);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-2);">
+                <h3 style="font-size: 1.05rem; font-weight: 600; margin: 0; color: var(--text-primary);">Workspace</h3>
+                <span class="chip chip-success" style="margin: 0;">Zone 0</span>
+              </div>
+              <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 var(--space-1) 0;">Agent working directory.</p>
+              <p id="zone-path-workspace" class="form-hint mono" style="margin: 0; word-break: break-all;">-</p>
+            </div>
+            <div style="display: flex; flex: 1;">
+              <div id="zone-browser-workspace" style="width: 100%;"></div>
+            </div>
           </div>
-          <div class="card-body">
-            <p class="text-muted">Staged exports awaiting delivery approval.</p>
-            <p id="zone-path-shared" class="form-hint mono">-</p>
-            <div id="zone-browser-shared" class="mt-4"></div>
+          
+          <div style="display: flex; flex-direction: column; border: 1px solid var(--warning-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--content-bg);">
+            <div style="padding: var(--space-4); border-bottom: 1px solid var(--warning-border); background: color-mix(in srgb, var(--warning-bg) 50%, var(--content-bg-alt));">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-2);">
+                <h3 style="font-size: 1.05rem; font-weight: 600; margin: 0; color: var(--text-primary);">Shared Zone</h3>
+                <span class="chip chip-warning" style="margin: 0;">Zone 2</span>
+              </div>
+              <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 var(--space-1) 0;">Staged exports awaiting delivery.</p>
+              <p id="zone-path-shared" class="form-hint mono" style="margin: 0; word-break: break-all;">-</p>
+            </div>
+            <div style="display: flex; flex: 1;">
+              <div id="zone-browser-shared" style="width: 100%;"></div>
+            </div>
           </div>
-        </div>
-        <div class="card zone-card-deliveries">
-          <div class="card-header">
-            <h3 class="card-title">Deliveries</h3>
-            <span class="chip chip-primary">User Dest</span>
+          
+          <div style="display: flex; flex-direction: column; border: 1px solid var(--brand-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--content-bg);">
+            <div style="padding: var(--space-4); border-bottom: 1px solid var(--brand-border); background: color-mix(in srgb, var(--brand-primary) 10%, var(--content-bg-alt));">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-2);">
+                <h3 style="font-size: 1.05rem; font-weight: 600; margin: 0; color: var(--text-primary);">Deliveries</h3>
+                <span class="chip chip-primary" style="margin: 0;">User Dest</span>
+              </div>
+              <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 var(--space-1) 0;">Final delivery destination.</p>
+              <p id="zone-path-deliver" class="form-hint mono" style="margin: 0; word-break: break-all;">-</p>
+            </div>
+            <div style="display: flex; flex: 1;">
+              <div id="zone-browser-deliver" style="width: 100%;"></div>
+            </div>
           </div>
-          <div class="card-body">
-            <p class="text-muted">Final delivery destination for completed exports.</p>
-            <p id="zone-path-deliver" class="form-hint mono">-</p>
-            <div id="zone-browser-deliver" class="mt-4"></div>
-          </div>
+          
         </div>
       </div>
     `;

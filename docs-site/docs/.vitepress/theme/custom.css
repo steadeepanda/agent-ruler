@@ -74,15 +74,15 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9999px;
-  border: 1px solid color-mix(in srgb, var(--ar-warning) 40%, var(--ar-content-border));
-  background: color-mix(in srgb, var(--ar-warning) 18%, transparent);
-  color: var(--ar-text-primary);
-  font-size: 0.66rem;
-  font-weight: 700;
+  border-radius: 999px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--ar-brand-primary);
+  font-size: 0.68rem;
+  font-weight: 600;
   line-height: 1;
-  padding: 2px 8px;
-  letter-spacing: 0.04em;
+  padding: 0.18rem 0.5rem;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 

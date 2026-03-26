@@ -24,6 +24,7 @@
 
     bindSidebarCollapse();
     bindMobileSidebar();
+    if (typeof bindTopNavToggle === 'function') bindTopNavToggle();
     
     // Bind modal close
     const modalBackdrop = document.getElementById('modal-backdrop');

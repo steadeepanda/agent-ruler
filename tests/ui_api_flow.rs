@@ -283,7 +283,7 @@ async fn ui_global_runtime_path_toggle_wiring_is_present() {
         "files page should render path hints through runtime alias helper"
     );
     assert!(
-        js.contains("Zone 0 (workspace): <span class=\"mono\">${esc(aliasRuntimePath("),
+        js.contains("Zone 0 (workspace):</span> <span class=\"mono\">${esc(aliasRuntimePath("),
         "runners page zone visibility should render through runtime alias helper"
     );
 }

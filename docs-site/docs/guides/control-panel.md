@@ -3,23 +3,19 @@
 This page is your practical tour of the WebUI.
 If you are still on setup, start with [Getting Started](/guides/getting-started).
 
-## Control Panel screenshots
+## Control Panel showcase
 
 <details>
-<summary><strong>Expand WebUI screenshot gallery</strong></summary>
+<summary><strong>Open WebUI showcase video</strong></summary>
 
-These screenshots show the full operator journey across the Control Panel tabs plus docs home.
+This recording shows the redesigned Control Panel flow for `v0.1.9`.
+The clip itself still shows `v0.1.8` in the UI because the version label was not updated before export.
 
-![Control Panel overview page](/images/control-webui/control-overview.png)
-![Control Panel approvals page](/images/control-webui/control-approvals.png)
-![Control Panel import export page](/images/control-webui/control-import-export.png)
-![Control Panel policy page](/images/control-webui/control-policy.png)
-![Control Panel runtime paths page](/images/control-webui/control-runtime-paths.png)
-![Control Panel settings page](/images/control-webui/control-settings.png)
-![Control Panel execution layer page](/images/control-webui/control-execution-layer.png)
-![Control Panel timeline page](/images/control-webui/control-timeline.png)
-![Control Panel runners page](/images/control-webui/control-runners-full.png)
-![Documentation home page](/images/control-webui/control-docs-home.png)
+<p align="center">
+  <a href="/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4">
+    <img src="/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404-poster.png" alt="Agent Ruler Control Panel showcase preview" width="900" />
+  </a>
+</p>
 
 </details>
 

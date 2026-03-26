@@ -89,8 +89,13 @@
       const updateChip = state.update && state.update.update_available
         ? `<a href="/settings" class="chip chip-warning">Update: ${esc(state.update.latest_tag || 'available')}</a>`
         : '';
-      const runnerChip = `<span class="chip chip-success">Runner: ${esc(selectedRunnerLabel())}</span>`;
-      const bridgeChipClass = telegramBridgeInSync() ? 'chip' : 'chip chip-warning';
+      const rId = selectedRunnerId();
+      const runnerChipClass = rId ? 'chip-success' : 'chip-danger';
+      const runnerChip = `<span class="chip ${runnerChipClass}">Runner: ${esc(selectedRunnerLabel())}</span>`;
+      
+      const bId = activeBridgeRunnerId();
+      const bConn = !!bId && bId !== 'none';
+      const bridgeChipClass = bConn ? (telegramBridgeInSync() ? 'chip chip-primary' : 'chip chip-warning') : 'chip';
       const bridgeChip = `<span class="${bridgeChipClass}">Telegram Bridge: ${esc(activeBridgeRunnerLabel())}</span>`;
       chips.innerHTML = `
         <span class="chip">Version: v${esc(s.app_version || '0.0.0')}</span>
@@ -540,5 +545,22 @@
     });
     window.addEventListener('resize', () => {
       if (window.innerWidth > 1024) setOpen(false);
+    });
+  }
+
+  function bindTopNavToggle() {
+    const toggleBtn = document.getElementById('top-nav-toggle');
+    const headerChips = document.getElementById('header-chips');
+    if (!toggleBtn || !headerChips) return;
+    
+    toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      headerChips.classList.toggle('open');
+    });
+    
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.top-nav-dropdown')) {
+        headerChips.classList.remove('open');
+      }
     });
   }

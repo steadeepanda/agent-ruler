@@ -7,19 +7,19 @@
     const mode = state.receipts.mode === 'logs' ? 'logs' : 'receipts';
 
     root.innerHTML = `
-      <div class="card">
-        <div class="card-header">
-          <div>
-            <h3 class="card-title">Timeline</h3>
-            <p class="card-description">Switch between governed action receipts and Control Panel logs <span class="chip chip-success" style="font-size: 0.75rem; margin-left: 8px;">● Live</span></p>
-          </div>
+      <div style="margin-bottom: var(--space-6); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: var(--space-4);">
+        <div>
+          <h2 style="font-size: 1.5rem; font-weight: 600; margin-bottom: var(--space-2); color: var(--text-primary);">Timeline</h2>
+          <p style="color: var(--text-muted); font-size: 0.95rem;">Governed action receipts and logs <span class="chip chip-success" style="font-size: 0.75rem; margin-left: 8px; font-weight: 600;">● Live</span></p>
         </div>
-        <div class="card-body">
-          <div class="timeline-mode-switch mb-4">
-            <button id="timeline-mode-receipts" class="btn btn-sm ${mode === 'receipts' ? 'btn-primary' : 'btn-ghost'}" type="button">Receipts</button>
-            <button id="timeline-mode-logs" class="btn btn-sm ${mode === 'logs' ? 'btn-primary' : 'btn-ghost'}" type="button">Logs</button>
-          </div>
-          <div class="filters">
+        <div class="timeline-mode-switch" style="display: flex; gap: var(--space-1); background: var(--content-bg-alt); padding: var(--space-1); border-radius: var(--radius-lg); border: 1px solid var(--content-border);">
+          <button id="timeline-mode-receipts" class="btn ${mode === 'receipts' ? 'btn-primary' : 'btn-ghost'}" style="border: none; border-radius: var(--radius); font-weight: 500; padding: var(--space-2) var(--space-4);">Receipts</button>
+          <button id="timeline-mode-logs" class="btn ${mode === 'logs' ? 'btn-primary' : 'btn-ghost'}" style="border: none; border-radius: var(--radius); font-weight: 500; padding: var(--space-2) var(--space-4);">Logs</button>
+        </div>
+      </div>
+
+      <div style="background: transparent; border-bottom: 1px solid var(--content-border); padding-bottom: var(--space-5); margin-bottom: var(--space-4);">
+        <div class="filters" style="margin-bottom: var(--space-4); padding: 0; background: transparent; border-radius: 0;">
             ${mode === 'receipts' ? `
               <div class="filter-group">
                 <label class="filter-label">Date</label>
@@ -74,26 +74,29 @@
                 </select>
               </div>
             `}
-            <div class="filter-actions">
+            <div class="filter-actions" style="display: flex; gap: var(--space-2); align-items: flex-end;">
               <button id="filter-apply" class="btn btn-primary btn-sm">Apply</button>
               <button id="filter-clear" class="btn btn-ghost btn-sm">Clear</button>
             </div>
-          </div>
-          ${mode === 'receipts' ? `
-            <label class="form-check mb-4">
+        </div>
+        ${mode === 'receipts' ? `
+          <div style="border-top: 1px solid var(--content-border); padding-top: var(--space-4);">
+            <label class="form-check" style="margin-bottom: var(--space-2);">
               <input type="checkbox" id="filter-show-details" class="form-check-input" ${showDetails ? 'checked' : ''} />
               <span class="form-check-label">Show operator-only debug details</span>
             </label>
-            <p class="form-hint mb-4">Summary view keeps output readable. Debug mode shows full command/diff context. Runtime label display is controlled globally in <a href="/settings">Control Settings</a>.</p>
-          ` : `
-            <p class="form-hint mb-4">Logs mode captures Control Panel events (errors, warnings, update checks/apply lifecycle) to help retrace issues.</p>
-          `}
-          
-          <div id="receipts-list" class="timeline"></div>
-          
-          <div id="receipts-pagination" class="pagination"></div>
-        </div>
+            <p class="form-hint" style="margin: 0;">Summary view keeps output readable. Debug mode shows full command/diff context. Runtime label display is controlled globally in <a href="/settings">Control Settings</a>.</p>
+          </div>
+        ` : `
+          <div style="border-top: 1px solid var(--content-border); padding-top: var(--space-4);">
+            <p class="form-hint" style="margin: 0;">Logs mode captures Control Panel events (errors, warnings, update checks/apply lifecycle) to help retrace issues.</p>
+          </div>
+        `}
       </div>
+      
+      <div id="receipts-list" class="timeline"></div>
+      
+      <div id="receipts-pagination" class="pagination" style="margin-top: var(--space-6);"></div>
     `;
 
     document.getElementById('timeline-mode-receipts').addEventListener('click', () => {

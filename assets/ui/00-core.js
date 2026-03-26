@@ -318,11 +318,8 @@
     const button = document.getElementById('theme-toggle');
     if (!button) return;
 
-    const icon = button.querySelector('.theme-toggle-icon');
-    const label = button.querySelector('.theme-toggle-label');
     const isDark = theme === 'dark';
-    if (icon) icon.textContent = isDark ? '🌙' : '☀️';
-    if (label) label.textContent = isDark ? 'Dark' : 'Light';
+    button.setAttribute('title', isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode');
     button.setAttribute('aria-pressed', isDark ? 'true' : 'false');
   }
 

@@ -2,13 +2,17 @@
 
 All notable user-facing changes are documented here.
 
-## [v0.1.10] - 2026-03-19
+## [v0.1.9] - 2026-03-25
 
-### OpenClaw approvals stability and continuity
-- Fixed a race in approval state persistence that could cause repeated OpenClaw approval prompts for the same action after approval.
-- Reduced approval-store write contention by persisting expiry updates only when state actually changes.
-- Hardened approval persistence atomic replace flow by using unique temp files per write.
-- Fixed OpenClaw approvals hook handling so callback/text approval commands are consumed instead of being replayed later as normal queued chat messages.
+### Control Panel WebUI redesign
+- Completed the structural and responsive Control Panel redesign across the main dashboard, policy, runners, import/export, and settings surfaces.
+- Fixed the Runners Fleet tab initial layout compaction so the first render stays readable on narrower screens.
+- Standardized the Import / Export refresh button style across the WebUI.
+- Reworked the Policy tabs into a consistent two-column boundary layout.
+- Fixed mobile header wrapping and sidebar toggle cutoff behavior on small screens.
+- Locked the Control Panel shield logo to the docs-site source of truth so the branding stays consistent.
+- Updated UI tests to match the new DOM structure after the redesign.
+
 
 ## [v0.1.8] - 2026-03-14
 

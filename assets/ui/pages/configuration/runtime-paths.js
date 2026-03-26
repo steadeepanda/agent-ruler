@@ -18,102 +18,83 @@
     const hidePaths = readRuntimePathsHidePreference();
     
     root.innerHTML = `
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Runtime Paths</h3>
-            <span class="chip">Read Mostly</span>
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2 class="settings-title">Runtime Paths</h2>
+          <p class="settings-description">Configure execution boundaries and filesystem locations for the Agent Ruler agent.</p>
+        </div>
+
+        <!-- Editable Paths Section -->
+        <div class="settings-section">
+          <div class="settings-section-header">
+            <h3>Delivery Paths</h3>
+            <p>Customize where files are shared and delivered.</p>
           </div>
-          <div class="card-body">
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="runtime-hide-paths" class="form-check-input" ${hidePaths ? 'checked' : ''} />
-                <span class="form-check-label">Hide paths display</span>
-              </label>
-              <p class="form-hint">This page defaults to full absolute paths so operators can inspect exact locations.</p>
+          <div class="settings-section-content">
+            <div class="settings-row">
+              <label class="form-label">Shared Zone Path</label>
+              <div style="display: flex; flex-direction: column; gap: var(--space-2);">
+                <input id="runtime-shared-path" class="form-input mono" value="${esc(r.shared_zone || '')}" />
+                <label class="form-check" style="margin: 0;">
+                  <input type="checkbox" id="runtime-shared-absolute" class="form-check-input" checked />
+                  <span class="form-check-label" style="font-size: 0.85rem;">Treat as absolute path</span>
+                </label>
+              </div>
             </div>
-            <div class="table-container">
-              <table class="table">
-                <tbody>
-                  <tr>
-                    <td><strong>Ruler Root</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.ruler_root, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Runtime Root</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.runtime_root, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Workspace</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.workspace, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Shared Zone</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.shared_zone, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>State Directory</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.state_dir, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Policy File</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.policy_file, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Receipts File</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.receipts_file, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Approvals File</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.approvals_file, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Staged Exports File</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.staged_exports_file, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Default Delivery Dir</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.default_delivery_dir, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Exec Layer Dir</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.exec_layer_dir, hidePaths))}</td>
-                  </tr>
-                  <tr>
-                    <td><strong>Quarantine Dir</strong></td>
-                    <td class="mono">${esc(displayRuntimePath(r.quarantine_dir, hidePaths))}</td>
-                  </tr>
-                </tbody>
-              </table>
+            
+            <div class="settings-row mt-4">
+              <label class="form-label">Default Delivery Directory</label>
+              <div style="display: flex; flex-direction: column; gap: var(--space-2);">
+                <input id="runtime-delivery-path" class="form-input mono" value="${esc(r.default_user_destination_dir || r.default_delivery_dir || '')}" />
+                <label class="form-check" style="margin: 0;">
+                  <input type="checkbox" id="runtime-delivery-absolute" class="form-check-input" checked />
+                  <span class="form-check-label" style="font-size: 0.85rem;">Treat as absolute path</span>
+                </label>
+              </div>
+              <p class="form-hint" style="margin-top: var(--space-1);">Used when Deliver destination is not explicitly customized by the policy.</p>
+            </div>
+
+            <div class="settings-row mt-4">
+              <button id="runtime-save-paths" class="btn btn-primary" style="align-self: flex-start;">Save Changes</button>
             </div>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Editable Paths</h3>
+        <!-- System Paths Section -->
+        <div class="settings-section" style="border-bottom: none;">
+          <div class="settings-section-header">
+            <h3>System Architecture</h3>
+            <p>Read-only paths configured by the environment deployment.</p>
+            <div class="mt-4">
+              <label class="form-switch">
+                <input type="checkbox" id="runtime-hide-paths" class="form-switch-input" ${hidePaths ? 'checked' : ''} />
+                <div class="form-switch-text">
+                  <span class="form-switch-label" style="font-size: 0.9rem;">Mask true paths</span>
+                </div>
+              </label>
+            </div>
           </div>
-          <div class="card-body">
-            <div class="form-group">
-              <label class="form-label">Shared Zone Path</label>
-              <input id="runtime-shared-path" class="form-input" value="${esc(r.shared_zone || '')}" />
-              <label class="form-check mt-2">
-                <input type="checkbox" id="runtime-shared-absolute" class="form-check-input" checked />
-                <span class="form-check-label">Treat as absolute path</span>
-              </label>
+          <div class="settings-section-content">
+            <div style="border: 1px solid var(--content-border); border-radius: var(--radius-lg); overflow: hidden; background: var(--bg-primary);">
+              ${[
+                ['Ruler Root', r.ruler_root],
+                ['Runtime Root', r.runtime_root],
+                ['Workspace', r.workspace],
+                ['Shared Zone', r.shared_zone],
+                ['State Directory', r.state_dir],
+                ['Policy File', r.policy_file],
+                ['Receipts File', r.receipts_file],
+                ['Approvals File', r.approvals_file],
+                ['Staged Exports File', r.staged_exports_file],
+                ['Exec Layer Dir', r.exec_layer_dir],
+                ['Quarantine Dir', r.quarantine_dir]
+              ].map(([label, val], idx, arr) => `
+                <div style="display: flex; padding: var(--space-3) var(--space-4); ${idx < arr.length - 1 ? 'border-bottom: 1px solid var(--content-border);' : ''}">
+                  <div style="width: 160px; font-size: 0.85rem; font-weight: 500; color: var(--text-secondary);">${esc(label)}</div>
+                  <div class="mono" style="flex: 1; font-size: 0.85rem; color: var(--text-primary); word-break: break-all;">${esc(displayRuntimePath(val, hidePaths))}</div>
+                </div>
+              `).join('')}
             </div>
-
-            <div class="form-group">
-              <label class="form-label">Default Delivery Directory</label>
-              <input id="runtime-delivery-path" class="form-input" value="${esc(r.default_user_destination_dir || r.default_delivery_dir || '')}" />
-              <label class="form-check mt-2">
-                <input type="checkbox" id="runtime-delivery-absolute" class="form-check-input" checked />
-                <span class="form-check-label">Treat as absolute path</span>
-              </label>
-              <p class="form-hint">Used when Deliver destination is not customized.</p>
-            </div>
-
-            <button id="runtime-save-paths" class="btn btn-primary">Save Paths</button>
           </div>
         </div>
       </div>

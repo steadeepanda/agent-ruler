@@ -52,228 +52,262 @@
     };
 
     const renderAllowFromEditor = (prefix, label) => `
-      <div class="form-group">
+      <div class="settings-row" style="margin-top: var(--space-4);">
         <label class="form-label">${label} Allowed Telegram Sender IDs</label>
         <p class="form-hint">Add one or many sender IDs (comma-separated). Run <code class="mono">/whoami</code> in Telegram to get your sender ID. Use <code class="mono">*</code> only for controlled local testing.</p>
-        <div class="id-list-controls">
+        <div style="display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3);">
           <input
             id="settings-${prefix}-allow-from-input"
             class="form-input"
+            style="max-width: 300px;"
             placeholder="example: 123456789, 987654321 or *"
           />
-          <button id="settings-${prefix}-allow-from-add" class="btn btn-ghost btn-sm" type="button">Add IDs</button>
-          <button id="settings-${prefix}-allow-from-remove-selected" class="btn btn-danger btn-sm" type="button">Delete Selected</button>
+          <button id="settings-${prefix}-allow-from-add" class="btn btn-secondary btn-sm" type="button">Add IDs</button>
+          <button id="settings-${prefix}-allow-from-remove-selected" class="btn btn-danger btn-sm" type="button" disabled>Delete Selected</button>
         </div>
-        <div id="settings-${prefix}-allow-from-list" class="domain-list id-list-container" role="list"></div>
+        <div id="settings-${prefix}-allow-from-list" class="domain-list id-list-container" role="list" style="max-height: 200px; overflow-y: auto;"></div>
       </div>
     `;
 
     // Keep runner bridge blocks visually consistent while allowing runner-local
     // values; this preserves structure without coupling Claude/OpenCode behavior.
     const renderRunnerTelegramSection = (prefix, label, cfg) => `
-      <div class="form-group">
-        <label class="form-check">
-          <input type="checkbox" id="settings-${prefix}-enabled" class="form-check-input" ${cfg.enabled ? 'checked' : ''} />
-          <span class="form-check-label">Enable ${label} Telegram bridge</span>
-        </label>
-        <p class="form-hint">Approvals remain enforced by Agent Ruler; Telegram carries both operator notifications and runner conversation.</p>
-      </div>
-
-      <div class="form-group">
-        <label class="form-check">
-          <input type="checkbox" id="settings-${prefix}-answer-streaming" class="form-check-input" ${cfg.answer_streaming_enabled !== false ? 'checked' : ''} />
-          <span class="form-check-label">Stream ${label} answers in Telegram</span>
-        </label>
-        <p class="form-hint">When enabled, the bridge edits the same Telegram reply progressively while the runner is still generating output.</p>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram Bot Token (optional update)</label>
-        <input id="settings-${prefix}-token" type="password" class="form-input" placeholder="Leave empty to keep existing token" value="" autocomplete="off" />
-        <p class="form-hint">
-          Current token: ${cfg.bot_token_configured ? esc(cfg.bot_token_masked || 'configured') : 'not configured'}.
-        </p>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram Routing</label>
-        <p class="form-hint">No manual chat targeting entry is required. The bridge binds chats/threads from inbound <code class="mono">/status</code>, <code class="mono">/continue</code>, and <code class="mono">/new</code> commands.</p>
-      </div>
-      ${renderAllowFromEditor(prefix, label)}
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram Poll Interval (seconds)</label>
-        <input id="settings-${prefix}-poll-interval" type="number" min="1" max="300" class="form-input" value="${esc(cfg.poll_interval_seconds || 8)}" />
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram Decision TTL (seconds)</label>
-        <input id="settings-${prefix}-decision-ttl" type="number" min="60" max="604800" class="form-input" value="${esc(cfg.decision_ttl_seconds || 7200)}" />
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram Short ID Length</label>
-        <input id="settings-${prefix}-short-id-length" type="number" min="4" max="10" class="form-input" value="${esc(cfg.short_id_length || 6)}" />
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">${label} Telegram State File</label>
-        <input id="settings-${prefix}-state-file" class="form-input" value="${esc(cfg.state_file || '')}" />
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>${label} Telegram Bridge</h3>
+          <p>Manage the ${label} integration with Telegram. Approvals remain enforced by Agent Ruler.</p>
+        </div>
+        <div class="settings-section-content">
+          <div class="settings-row">
+            <label class="form-switch">
+              <input type="checkbox" id="settings-${prefix}-enabled" class="form-switch-input" ${cfg.enabled ? 'checked' : ''} />
+              <div class="form-switch-text">
+                <span class="form-switch-label">Enable Telegram Bridge</span>
+                <span class="form-switch-description">Carry both operator notifications and runner conversations across Telegram.</span>
+              </div>
+            </label>
+          </div>
+          <div class="settings-row">
+            <label class="form-switch">
+              <input type="checkbox" id="settings-${prefix}-answer-streaming" class="form-switch-input" ${cfg.answer_streaming_enabled !== false ? 'checked' : ''} />
+              <div class="form-switch-text">
+                <span class="form-switch-label">Stream answers in Telegram</span>
+                <span class="form-switch-description">Progressively update the same reply message while generation is ongoing.</span>
+              </div>
+            </label>
+          </div>
+          <div class="settings-row mt-3">
+            <label class="form-label">Telegram Bot Token</label>
+            <input id="settings-${prefix}-token" type="password" class="form-input" placeholder="Leave empty to keep existing token" autocomplete="off" />
+            <p class="form-hint">Current status: ${cfg.bot_token_configured ? 'Configured' : 'Not configured'}</p>
+          </div>
+          ${renderAllowFromEditor(prefix, label)}
+          
+          <div class="settings-row-split mt-4">
+            <div class="settings-row" style="flex:1;">
+              <label class="form-label">Poll Interval (seconds)</label>
+              <input id="settings-${prefix}-poll-interval" type="number" min="1" max="300" class="form-input" value="${esc(cfg.poll_interval_seconds || 8)}" />
+            </div>
+            <div class="settings-row" style="flex:1;">
+              <label class="form-label">Decision TTL (seconds)</label>
+              <input id="settings-${prefix}-decision-ttl" type="number" min="60" max="604800" class="form-input" value="${esc(cfg.decision_ttl_seconds || 7200)}" />
+            </div>
+          </div>
+          
+          <div class="settings-row-split">
+            <div class="settings-row" style="flex:1;">
+              <label class="form-label">Short ID Length</label>
+              <input id="settings-${prefix}-short-id-length" type="number" min="4" max="10" class="form-input" value="${esc(cfg.short_id_length || 6)}" />
+            </div>
+            <div class="settings-row" style="flex:1;">
+              <label class="form-label">State File</label>
+              <input id="settings-${prefix}-state-file" class="form-input mono" value="${esc(cfg.state_file || '')}" />
+            </div>
+          </div>
+        </div>
       </div>
     `;
 
     root.innerHTML = `
-      <div class="card">
-        <div class="card-header">
-          <div>
-            <h3 class="card-title">Control Panel Settings</h3>
-            <p class="card-description">Use runner tabs to keep bridge settings focused and easier to scan.</p>
-          </div>
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2 class="settings-title">Control Settings</h2>
+          <p class="settings-description">Manage core system options, UI behaviors, and Runner bridge integrations.</p>
         </div>
-        <div class="card-body">
-          <div class="panel-tabs settings-tabs" role="tablist" aria-label="Control settings sections">
-            <button type="button" class="panel-tab" data-settings-tab="general" role="tab">General</button>
-            <button type="button" class="panel-tab" data-settings-tab="openclaw" role="tab">OpenClaw Bridge</button>
-            <button type="button" class="panel-tab" data-settings-tab="claudecode" role="tab">Claude Code Bridge</button>
-            <button type="button" class="panel-tab" data-settings-tab="opencode" role="tab">OpenCode Bridge</button>
-          </div>
+        
+        <div class="panel-tabs settings-tabs" role="tablist" style="margin-bottom: var(--space-6); border-bottom: 1px solid var(--content-border);">
+          <button type="button" class="panel-tab" data-settings-tab="general" role="tab">General</button>
+          <button type="button" class="panel-tab" data-settings-tab="openclaw" role="tab">OpenClaw</button>
+          <button type="button" class="panel-tab" data-settings-tab="claudecode" role="tab">Claude Code</button>
+          <button type="button" class="panel-tab" data-settings-tab="opencode" role="tab">OpenCode</button>
+        </div>
 
-          <section class="settings-tab-panel" data-settings-tab-panel="general">
-            <div class="form-group">
-              <label class="form-label">Ruler Version</label>
-              <div class="btn-group">
-                <div class="chip">v${esc(appVersion)}</div>
-                <button id="settings-check-updates" class="btn btn-ghost btn-sm btn-chip-match" type="button">Check for Updates</button>
-                <button id="settings-apply-update" class="btn btn-warning btn-sm" type="button" style="display:none;">Update Now</button>
+        <section class="settings-tab-panel" data-settings-tab-panel="general">
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>System Version</h3>
+              <p>Keep Agent Ruler up to date. Updating preserves your runtime data and config.</p>
+            </div>
+            <div class="settings-section-content">
+              <div class="settings-row" style="background: var(--content-bg); border: 1px solid var(--content-border); padding: var(--space-4); border-radius: var(--radius-lg);">
+                <div style="display: flex; align-items: center; gap: var(--space-4);">
+                  <div class="chip">v${esc(appVersion)}</div>
+                  <button id="settings-check-updates" class="btn btn-secondary btn-sm" type="button">Check for Updates</button>
+                  <button id="settings-apply-update" class="btn btn-warning btn-sm" type="button" style="display:none;">Update Now</button>
+                </div>
+                <p id="settings-update-status" class="form-hint" style="margin-top: var(--space-2); margin-bottom: 0;">Checking release updates…</p>
               </div>
-              <p id="settings-update-status" class="form-hint mt-2">Checking release updates…</p>
             </div>
-            <div class="form-group">
-              <label class="form-label">UI Bind Address</label>
-              <input id="settings-ui-bind" class="form-input" value="${esc(c.ui_bind || state.status?.ui_bind || '127.0.0.1:4622')}" placeholder="127.0.0.1:4622" />
-              <p class="form-hint">Applies on next UI restart.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="settings-runtime-path-labels" class="form-check-input" ${state.pathDisplay?.useRuntimeAliases ? 'checked' : ''} />
-                <span class="form-check-label">Use runtime path labels (recommended)</span>
-              </label>
-              <p class="form-hint">Display only. ON shows labels like <code class="mono">WORKSPACE_PATH</code>; OFF shows full absolute paths.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-check">
-                <input type="checkbox" id="settings-degraded" class="form-check-input" ${c.allow_degraded_confinement ? 'checked' : ''} />
-                <span class="form-check-label">Allow degraded confinement fallback</span>
-              </label>
-              <p class="form-hint">Keep disabled unless your host blocks namespaces and you explicitly accept weaker isolation.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Default Approval Wait Timeout (seconds)</label>
-              <input
-                id="settings-approval-wait-timeout"
-                type="number"
-                min="1"
-                max="300"
-                class="form-input"
-                value="${esc(c.approval_wait_timeout_secs || 90)}"
-              />
-              <p class="form-hint">Safe default is 90s. Agents can still override per wait call when needed.</p>
-            </div>
-          </section>
+          </div>
 
-          <section class="settings-tab-panel hidden" data-settings-tab-panel="openclaw">
-            <p class="settings-tab-copy">OpenClaw gateway bridge settings for operator channel mediation.</p>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge Poll Interval (seconds)</label>
-              <input
-                id="settings-bridge-poll-interval"
-                type="number"
-                min="1"
-                max="300"
-                class="form-input"
-                value="${esc(b.poll_interval_seconds || 8)}"
-              />
-              <p class="form-hint">How often bridge checks pending approvals on Agent Ruler.</p>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>Network & UI</h3>
+              <p>Configure where the web interface listens for incoming connections.</p>
             </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge Decision TTL (seconds)</label>
-              <input
-                id="settings-bridge-decision-ttl"
-                type="number"
-                min="60"
-                max="604800"
-                class="form-input"
-                value="${esc(b.decision_ttl_seconds || 7200)}"
-              />
-              <p class="form-hint">How long short-id decision mappings stay valid for inbound approve/deny replies.</p>
+            <div class="settings-section-content">
+              <div class="settings-row">
+                <label class="form-label">UI Bind Address</label>
+                <input id="settings-ui-bind" class="form-input mono" style="max-width: 300px;" value="${esc(c.ui_bind || state.status?.ui_bind || '127.0.0.1:4622')}" placeholder="127.0.0.1:4622" />
+                <p class="form-hint">Applies on the next UI restart.</p>
+              </div>
+              <div class="settings-row mt-4">
+                <label class="form-switch">
+                  <input type="checkbox" id="settings-runtime-path-labels" class="form-switch-input" ${state.pathDisplay?.useRuntimeAliases ? 'checked' : ''} />
+                  <div class="form-switch-text">
+                    <span class="form-switch-label">Use runtime path labels (Recommended)</span>
+                    <span class="form-switch-description">Display only. Collapses paths to aliases like <span class="mono chip" style="padding:0 4px; font-size: 0.75rem;">WORKSPACE_PATH</span>.</span>
+                  </div>
+                </label>
+              </div>
             </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge Short ID Length</label>
-              <input
-                id="settings-bridge-short-id-length"
-                type="number"
-                min="4"
-                max="10"
-                class="form-input"
-                value="${esc(b.short_id_length || 6)}"
-              />
-              <p class="form-hint">Length of operator-facing short IDs used in channel approval commands.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge Inbound Bind</label>
-              <input id="settings-bridge-inbound-bind" class="form-input" value="${esc(b.inbound_bind || '127.0.0.1:4661')}" placeholder="127.0.0.1:4661" />
-              <p class="form-hint">OpenClaw approvals hook posts inbound channel events to this address.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge State File</label>
-              <input id="settings-bridge-state-file" class="form-input" value="${esc(b.state_file || '')}" />
-              <p class="form-hint">Stores seen approvals and short-id mappings for restart-safe behavior.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw CLI Binary</label>
-              <input id="settings-bridge-openclaw-bin" class="form-input" value="${esc(b.openclaw_bin || 'openclaw')}" />
-              <p class="form-hint">CLI used by bridge to send channel messages.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Agent Ruler CLI Binary (Operator Resolution)</label>
-              <input id="settings-bridge-agent-ruler-bin" class="form-input" value="${esc(b.agent_ruler_bin || 'agent-ruler')}" />
-              <p class="form-hint">Bridge uses this operator CLI for approve/deny button actions.</p>
-            </div>
-            <div class="form-group">
-              <label class="form-label">OpenClaw Bridge URLs</label>
-              <div class="mono">ruler_url: ${esc(b.ruler_url || '')}</div>
-              <div class="mono">public_base_url: ${esc(b.public_base_url || '')}</div>
-              <div class="mono">runtime_dir: ${esc(b.runtime_dir || '')}</div>
-              <p class="form-hint">Auto-derived from UI bind and Tailscale availability when settings are loaded/saved.</p>
-            </div>
-          </section>
+          </div>
 
-          <section class="settings-tab-panel hidden" data-settings-tab-panel="claudecode">
-            <p class="settings-tab-copy">Claude Code runner bridge settings.</p>
-            ${renderRunnerTelegramSection('claudecode-bridge', 'Claude Code', claudecodeBridge)}
-          </section>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>Behavioral Guardrails</h3>
+              <p>Tune approval workflows and security fallbacks.</p>
+            </div>
+            <div class="settings-section-content">
+              <div class="settings-row">
+                <label class="form-label">Default Approval Wait Timeout</label>
+                <div style="display: flex; align-items: center; gap: var(--space-2);">
+                  <input id="settings-approval-wait-timeout" type="number" min="1" max="300" class="form-input" style="max-width: 100px; text-align: center;" value="${esc(c.approval_wait_timeout_secs || 90)}" />
+                  <span class="form-hint" style="margin:0;">seconds</span>
+                </div>
+                <p class="form-hint">Safe default is 90s. Agents can override this per decision up to a maximum limit.</p>
+              </div>
+              <div class="settings-row mt-4" style="border: 1px solid var(--warning-border); border-left: 3px solid var(--warning); padding: var(--space-4); border-radius: var(--radius-lg);">
+                <label class="form-switch">
+                  <input type="checkbox" id="settings-degraded" class="form-switch-input" ${c.allow_degraded_confinement ? 'checked' : ''} />
+                  <div class="form-switch-text">
+                    <span class="form-switch-label" style="color: var(--warning);">Allow degraded confinement fallback</span>
+                    <span class="form-switch-description">Keep disabled unless your host environment completely blocks namespaces and you explicitly accept weaker isolation.</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+        </section>
 
-          <section class="settings-tab-panel hidden" data-settings-tab-panel="opencode">
-            <p class="settings-tab-copy">OpenCode runner bridge settings.</p>
-            ${renderRunnerTelegramSection('opencode-bridge', 'OpenCode', opencodeBridge)}
-          </section>
+        <section class="settings-tab-panel hidden" data-settings-tab-panel="openclaw">
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>Bridge Timers</h3>
+              <p>Polling rates and lifetime configurations.</p>
+            </div>
+            <div class="settings-section-content">
+              <div class="settings-row-split">
+                <div class="settings-row" style="flex:1;">
+                  <label class="form-label">Poll Interval (s)</label>
+                  <input id="settings-bridge-poll-interval" type="number" min="1" max="300" class="form-input" value="${esc(b.poll_interval_seconds || 8)}" />
+                  <p class="form-hint">How often bridge checks Agent Ruler.</p>
+                </div>
+                <div class="settings-row" style="flex:1;">
+                  <label class="form-label">Decision TTL (s)</label>
+                  <input id="settings-bridge-decision-ttl" type="number" min="60" max="604800" class="form-input" value="${esc(b.decision_ttl_seconds || 7200)}" />
+                  <p class="form-hint">Mapping validity for inbound replies.</p>
+                </div>
+              </div>
+            </div>
+          </div>
 
-          <div class="settings-save-row">
-            <button id="settings-save-structured" class="btn btn-primary">Save Control Settings</button>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>Bridge Execution</h3>
+              <p>Bind targets and state storage.</p>
+            </div>
+            <div class="settings-section-content">
+              <div class="settings-row mb-3">
+                <label class="form-label">Short ID Length</label>
+                <input id="settings-bridge-short-id-length" type="number" min="4" max="10" class="form-input" value="${esc(b.short_id_length || 6)}" style="max-width: 100px;" />
+              </div>
+              <div class="settings-row mb-3">
+                <label class="form-label">Inbound Bind Address</label>
+                <input id="settings-bridge-inbound-bind" class="form-input mono" value="${esc(b.inbound_bind || '127.0.0.1:4661')}" placeholder="127.0.0.1:4661" />
+              </div>
+              <div class="settings-row">
+                <label class="form-label">State File</label>
+                <input id="settings-bridge-state-file" class="form-input mono" value="${esc(b.state_file || '')}" />
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3>Binaries & Endpoints</h3>
+              <p>External path requirements and derived URLs.</p>
+            </div>
+            <div class="settings-section-content">
+              <div class="settings-row mb-3">
+                <label class="form-label">OpenClaw CLI Binary</label>
+                <input id="settings-bridge-openclaw-bin" class="form-input mono" value="${esc(b.openclaw_bin || 'openclaw')}" />
+              </div>
+              <div class="settings-row mb-3">
+                <label class="form-label">Agent Ruler CLI Binary</label>
+                <input id="settings-bridge-agent-ruler-bin" class="form-input mono" value="${esc(b.agent_ruler_bin || 'agent-ruler')}" />
+              </div>
+              <div class="settings-row" style="background: var(--bg-primary); padding: var(--space-4); border-radius: var(--radius-lg); border: 1px solid var(--content-border);">
+                <label class="form-label" style="margin-bottom: var(--space-2);">Derived URLs</label>
+                <div class="mono" style="font-size: 0.85rem; margin-bottom: 6px; color: var(--text-secondary);">ruler_url: <span style="color: var(--text-primary);">${esc(b.ruler_url || '')}</span></div>
+                <div class="mono" style="font-size: 0.85rem; margin-bottom: 6px; color: var(--text-secondary);">public_base_url: <span style="color: var(--text-primary);">${esc(b.public_base_url || '')}</span></div>
+                <div class="mono" style="font-size: 0.85rem; color: var(--text-secondary);">runtime_dir: <span style="color: var(--text-primary);">${esc(b.runtime_dir || '')}</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-tab-panel hidden" data-settings-tab-panel="claudecode">
+          ${renderRunnerTelegramSection('claudecode-bridge', 'Claude Code', claudecodeBridge)}
+        </section>
+
+        <section class="settings-tab-panel hidden" data-settings-tab-panel="opencode">
+          ${renderRunnerTelegramSection('opencode-bridge', 'OpenCode', opencodeBridge)}
+        </section>
+
+        <div class="settings-section" style="border-bottom: none; padding-bottom: 0;">
+          <div class="settings-section-header">
+             <h3>Save Changes</h3>
+             <p>Review changes before applying them to the configuration profile.</p>
+          </div>
+          <div class="settings-section-content">
+             <button id="settings-save-structured" class="btn btn-primary" style="align-self: flex-start;">Save Control Settings</button>
           </div>
         </div>
-      </div>
 
-      <div class="card mt-5">
-        <div class="card-header">
-          <h3 class="card-title">Configuration File</h3>
-        </div>
-        <div class="card-body">
-          <div class="mono">${esc(aliasRuntimePath(configPath))}</div>
-          <div class="mono mt-2">${esc(aliasRuntimePath(bridgeConfigPath))}</div>
-          <div class="mono mt-2">${esc(aliasRuntimePath(claudecodeBridgeConfigPath))}</div>
-          <div class="mono mt-2">${esc(aliasRuntimePath(opencodeBridgeConfigPath))}</div>
-          <p class="form-hint mt-2">Runtime path edits for shared-zone and default delivery remain available in <a href="/runtime">Runtime Paths</a>.</p>
+        <div class="settings-section" style="border-top: 1px dashed var(--content-border); margin-top: var(--space-8);">
+          <div class="settings-section-header">
+            <h3>State Locations</h3>
+            <p>Paths to the actual stored YAML/JSON configuration files.</p>
+          </div>
+          <div class="settings-section-content">
+            <div style="display: flex; flex-direction: column; gap: var(--space-3); background: var(--bg-primary); padding: var(--space-4); border-radius: var(--radius-lg); border: 1px solid var(--content-border);">
+              <div class="mono" style="font-size: 0.85rem; word-break: break-all; color: var(--text-secondary);">${esc(aliasRuntimePath(configPath))}</div>
+              <div class="mono" style="font-size: 0.85rem; word-break: break-all; color: var(--text-secondary);">${esc(aliasRuntimePath(bridgeConfigPath))}</div>
+              <div class="mono" style="font-size: 0.85rem; word-break: break-all; color: var(--text-secondary);">${esc(aliasRuntimePath(claudecodeBridgeConfigPath))}</div>
+              <div class="mono" style="font-size: 0.85rem; word-break: break-all; color: var(--text-secondary);">${esc(aliasRuntimePath(opencodeBridgeConfigPath))}</div>
+            </div>
+          </div>
         </div>
       </div>
     `;

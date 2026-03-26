@@ -30,20 +30,16 @@ If you want the full story (and get the vibe), read: **[about this project](./ab
 ## Product Showcase
 
 <details>
-<summary><strong>Control Panel WebUI Gallery</strong></summary>
+<summary><strong>Control Panel WebUI Showcase</strong></summary>
 
-Screenshots below show the main operator surfaces: overview, approvals, import/export, policy, runtime paths, settings, execution layer, timeline, runners, and docs home.
+This recording shows the redesigned Control Panel flow for `v0.1.9`.
+The clip itself still shows `v0.1.8` in the UI because I forgot to update the version label before exporting it.
 
-<img src="docs-site/docs/public/images/control-webui/control-overview.png" alt="Agent Ruler Control Panel overview page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-approvals.png" alt="Agent Ruler Control Panel approvals page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-import-export.png" alt="Agent Ruler Control Panel import export page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-policy.png" alt="Agent Ruler Control Panel policy page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-runtime-paths.png" alt="Agent Ruler Control Panel runtime paths page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-settings.png" alt="Agent Ruler Control Panel settings page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-execution-layer.png" alt="Agent Ruler Control Panel execution layer page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-timeline.png" alt="Agent Ruler Control Panel timeline page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-runners-full.png" alt="Agent Ruler Control Panel runners page" width="900" />
-<img src="docs-site/docs/public/images/control-webui/control-docs-home.png" alt="Agent Ruler documentation home page" width="900" />
+<p align="center">
+  <a href="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404.mp4">
+    <img src="docs-site/docs/public/videos/agent-ruler_showcase_v0.1.9_preview_20260325_224404-poster.png" alt="Agent Ruler Control Panel showcase preview" width="900" />
+  </a>
+</p>
 
 </details>
 
