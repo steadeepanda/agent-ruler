@@ -33,13 +33,13 @@ cargo run -- <subcommand> [args...]
 Option A (recommended fast): installer script
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh" | bash -s -- --release
+curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh" | bash -s -- --release
 ```
 
 Safer script variant:
 
 ```bash
-curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh"
+curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh"
 bash install.sh --release
 ```
 

@@ -20,8 +20,14 @@ Notes:
 EOF
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+SCRIPT_DIR=""
+REPO_ROOT=""
+
+if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 DEFAULT_RELEASE_ARCHIVE="agent-ruler-linux-x86_64.tar.gz"
 DEFAULT_RELEASE_SUMS="SHA256SUMS.txt"
 
@@ -31,6 +37,15 @@ require_cmd() {
     echo "[install] required command not found: ${cmd}" >&2
     exit 1
   fi
+}
+
+require_repo_checkout() {
+  if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" ]]; then
+    return 0
+  fi
+
+  echo "[install] --local requires a checked-out repository; run bash install/install.sh --local from the repo root" >&2
+  exit 1
 }
 
 stop_managed_runtime_processes() {
@@ -317,6 +332,8 @@ prune_stale_install_instances() {
 }
 
 install_local() {
+  require_repo_checkout
+
   local build_target="${REPO_ROOT}/target/release/agent-ruler"
   local install_root="${HOME}/.local/share/agent-ruler/installs/dev"
   local install_parent="${HOME}/.local/share/agent-ruler/installs"

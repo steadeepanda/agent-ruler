@@ -158,9 +158,9 @@ Agent Ruler keeps managed runtime paths and governance wiring in place.
 ## Installer options
 
 - Release install option A (recommended/fast script):
-  - one-liner: `curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh" | bash -s -- --release`
+  - one-liner: `curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh" | bash -s -- --release`
   - safer variant:
-      * `curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/main/install/install.sh"`
+      * `curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh"`
       * `bash install.sh --release`
   - private repo/fork: set `GITHUB_TOKEN` and optional `AGENT_RULER_GITHUB_REPO=<owner>/<repo>`
 - Release install option B (manual): download `agent-ruler-linux-x86_64.tar.gz` + `SHA256SUMS.txt`, run `sha256sum -c`, extract, install binary under `~/.local/share/agent-ruler/installs/<tag>/agent-ruler`, copy bundled `bridge/` + `docs-site/` into `~/.local/share/agent-ruler/installs/` when present, and link `~/.local/bin/agent-ruler`.
