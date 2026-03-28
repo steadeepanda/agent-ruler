@@ -85,13 +85,13 @@ Option A (recommended/fast): installer script
 One-liner variant:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh" | bash -s -- --release
+curl -fsSL "https://raw.githubusercontent.com/steadeepanda/agent-ruler/refs/heads/master/install/install.sh" | bash -s -- --release
 ```
 
 Safer script variant (if you want to inspect before running):
 
 ```bash
-curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/master/install/install.sh"
+curl -fsSLO "https://raw.githubusercontent.com/steadeepanda/agent-ruler/refs/heads/master/install/install.sh"
 bash install.sh --release
 ```
 
