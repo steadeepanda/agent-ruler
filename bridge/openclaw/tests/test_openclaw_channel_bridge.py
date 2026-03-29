@@ -1311,6 +1311,26 @@ class BridgeConfigLoadTests(unittest.TestCase):
         )
 
     @patch("bridge.openclaw.channel_bridge.subprocess.run")
+    def test_load_config_can_defer_openclaw_route_resolution_until_after_bind(self, run_mock):
+        self._write_config(
+            {
+                "ruler_url": "http://127.0.0.1:4622",
+                "public_base_url": "http://127.0.0.1:4622",
+                "openclaw_home": "/tmp/managed-openclaw-home",
+            }
+        )
+
+        config = load_config(
+            self.config_path,
+            self._args(),
+            defer_openclaw_route_resolution=True,
+        )
+
+        self.assertEqual(config.routes_source, "openclaw_startup_deferred")
+        self.assertEqual(config.routes, [])
+        run_mock.assert_not_called()
+
+    @patch("bridge.openclaw.channel_bridge.subprocess.run")
     def test_load_config_uses_openclaw_route_config_when_routes_omitted(self, run_mock):
         self._write_config(
             {
@@ -1612,6 +1632,75 @@ class BridgeConfigLoadTests(unittest.TestCase):
         set_payload = json.loads(set_cmd[4])
         self.assertEqual(len(set_payload), 1)
         self.assertTrue(set_payload[0]["telegram_streaming_enabled"])
+
+    @patch("bridge.openclaw.channel_bridge.subprocess.run")
+    def test_refresh_routes_syncs_discovered_defaults_after_startup_defer(self, run_mock):
+        self._write_allow_from("telegram", "default", ["123456789"])
+        runtime = ApprovalBridgeRuntime(
+            BridgeConfig(
+                ruler_url="http://127.0.0.1:4622",
+                public_base_url="http://127.0.0.1:4622",
+                poll_interval_seconds=8,
+                decision_ttl_seconds=3600,
+                inbound_bind="127.0.0.1:4661",
+                state_file=Path(self.tempdir.name) / "bridge-state.json",
+                openclaw_bin="openclaw",
+                openclaw_home=self.tempdir.name,
+                agent_ruler_bin="agent-ruler",
+                runtime_dir=None,
+                dry_run_send=True,
+                short_id_length=6,
+                telegram_typing_keepalive=True,
+                telegram_typing_interval_seconds=5,
+                routes_source="openclaw_startup_deferred",
+                routes=[],
+            ),
+            AgentRulerClient("http://127.0.0.1:4622"),
+            FakeMessenger(),
+        )
+
+        run_mock.side_effect = [
+            CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "Config path not found: "
+                    "plugins.entries.openclaw-agent-ruler-tools.config.approvalBridgeRoutes"
+                ),
+            ),
+            CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps({"telegram": {"enabled": True, "streaming": True}}),
+                stderr="",
+            ),
+            CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps({"ok": True}),
+                stderr="",
+            ),
+        ]
+
+        runtime.refresh_routes(force=True)
+
+        self.assertEqual(runtime.config.routes_source, "openclaw_managed_config")
+        self.assertEqual(len(runtime.config.routes), 1)
+        self.assertEqual(runtime.config.routes[0].target, "123456789")
+        self.assertTrue(runtime.config.routes[0].telegram_streaming_enabled)
+
+        set_call = run_mock.call_args_list[2]
+        set_cmd = set_call.args[0]
+        self.assertEqual(
+            set_cmd[:4],
+            [
+                "openclaw",
+                "config",
+                "set",
+                "plugins.entries.openclaw-agent-ruler-tools.config.approvalBridgeRoutes",
+            ],
+        )
 
 
 if __name__ == "__main__":

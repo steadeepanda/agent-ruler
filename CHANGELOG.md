@@ -2,6 +2,20 @@
 
 All notable user-facing changes are documented here.
 
+## [v0.1.9-1] - 2026-03-29
+
+### OpenClaw bridge startup hardening
+- Fixed the managed OpenClaw approvals bridge startup path so the inbound listener binds before slow OpenClaw route discovery finishes.
+- Added bounded timeouts around bridge-side OpenClaw config reads and writes to prevent indefinite startup hangs on slower machines.
+- Increased the outer managed OpenClaw bridge startup wait window to better tolerate cold-start config latency across different Linux hosts.
+- Added regression coverage for the deferred route-resolution startup path and post-bind route auto-sync.
+
+### Troubleshooting cleanup
+- Reworked the troubleshooting docs into explicit `[User]` and `[Developer]` sections.
+- Added bridge-timeout diagnostics and recovery guidance for empty bridge logs / slow OpenClaw config discovery.
+- Added Bubblewrap `uid map` / AppArmor remediation guidance for Linux hosts that block user namespaces.
+- Restored high-value historical troubleshooting entries for real runtime failures such as Anthropic auth import issues, gateway port conflicts, OpenCode model lookup failures, and Claude Code MCP duplication errors.
+
 ## [v0.1.9] - 2026-03-25
 
 ### Control Panel WebUI redesign

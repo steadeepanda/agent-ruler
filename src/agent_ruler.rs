@@ -990,6 +990,7 @@ const OPENCLAW_CHANNEL_BRIDGE_LEGACY_LOCAL_CONFIG_FILE_NAME: &str =
 const OPENCLAW_CHANNEL_BRIDGE_SCRIPT_FILE_NAME: &str = "channel_bridge.py";
 const RUNNER_TELEGRAM_CHANNEL_BRIDGE_SCRIPT_FILE_NAME: &str = "channel_bridge.py";
 const OPENCLAW_CHANNEL_BRIDGE_LEGACY_SCRIPT_FILE_NAME: &str = "openclaw_channel_bridge.py";
+const OPENCLAW_CHANNEL_BRIDGE_STARTUP_TIMEOUT_SECS: u64 = 15;
 const OPENCLAW_BRIDGE_ROUTES_POINTER: &str =
     "plugins.entries.openclaw-agent-ruler-tools.config.approvalBridgeRoutes";
 const OPENCLAW_APPROVALS_HOOK_ID: &str = "agent-ruler-approvals";
@@ -1620,7 +1621,8 @@ fn maybe_start_managed_openclaw_bridge(
         );
     }
 
-    let startup_deadline = Instant::now() + Duration::from_secs(5);
+    let startup_deadline =
+        Instant::now() + Duration::from_secs(OPENCLAW_CHANNEL_BRIDGE_STARTUP_TIMEOUT_SECS);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {

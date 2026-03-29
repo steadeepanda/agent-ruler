@@ -37,6 +37,8 @@ DEFAULT_STATE_FILE = (
 DEFAULT_DECISION_TTL_SECONDS = 7200
 DEFAULT_RECENT_RESOLVED_SHORT_TTL_SECONDS = 600
 DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
+DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS = 12.0
+DEFAULT_AGENT_RULER_STATUS_TIMEOUT_SECONDS = 5.0
 DEFAULT_SHORT_ID_LENGTH = 6
 DEFAULT_AGENT_RULER_BIN = "agent-ruler"
 DEFAULT_ROUTE_REFRESH_INTERVAL_SECONDS = 8
@@ -649,10 +651,11 @@ class ApprovalBridgeRuntime:
                 return
 
             try:
+                allow_persist = self.config.routes_source == "openclaw_startup_deferred"
                 source, routes, synced = resolve_openclaw_routes(
                     openclaw_bin=self.config.openclaw_bin,
                     openclaw_home=self.config.openclaw_home,
-                    allow_persist=False,
+                    allow_persist=allow_persist,
                 )
             except BridgeError as err:
                 self._next_routes_refresh_at = now + self._route_refresh_interval_seconds
@@ -2414,7 +2417,19 @@ def write_routes_to_openclaw_config(
     if openclaw_home:
         env["OPENCLAW_HOME"] = openclaw_home
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise BridgeError(
+            "timed out while writing OpenClaw bridge routes via "
+            f"`{' '.join(cmd)}` after {DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS:.0f}s"
+        ) from err
     except OSError as err:
         raise BridgeError(
             "failed to execute OpenClaw CLI while writing bridge routes: "
@@ -2475,8 +2490,14 @@ def resolve_openclaw_routes(
 def discover_managed_openclaw_home(agent_ruler_bin: str) -> Optional[str]:
     cmd = [agent_ruler_bin, "status", "--json"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    except OSError:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DEFAULT_AGENT_RULER_STATUS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -2513,7 +2534,19 @@ def read_routes_from_openclaw_config(
     if openclaw_home:
         env["OPENCLAW_HOME"] = openclaw_home
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise BridgeError(
+            "timed out while loading OpenClaw bridge routes via "
+            f"`{' '.join(cmd)}` after {DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS:.0f}s"
+        ) from err
     except OSError as err:
         raise BridgeError(
             "failed to execute OpenClaw CLI while loading bridge routes: "
@@ -2548,7 +2581,19 @@ def read_openclaw_channels_config(
     if openclaw_home:
         env["OPENCLAW_HOME"] = openclaw_home
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as err:
+        raise BridgeError(
+            "timed out while loading OpenClaw channels config via "
+            f"`{' '.join(cmd)}` after {DEFAULT_OPENCLAW_CONFIG_TIMEOUT_SECONDS:.0f}s"
+        ) from err
     except OSError as err:
         raise BridgeError(
             "failed to execute OpenClaw CLI while loading channels config: "
@@ -2666,7 +2711,12 @@ def discover_routes_from_channel_defaults(
     return routes
 
 
-def load_config(path: Path, args: argparse.Namespace) -> BridgeConfig:
+def load_config(
+    path: Path,
+    args: argparse.Namespace,
+    *,
+    defer_openclaw_route_resolution: bool = False,
+) -> BridgeConfig:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise BridgeError(f"invalid config file: {path}")
@@ -2689,16 +2739,20 @@ def load_config(path: Path, args: argparse.Namespace) -> BridgeConfig:
     routes_raw = raw.get("routes")
     routes_source = "bridge_config"
     if routes_raw in (None, []):
-        routes_source, routes, synced = resolve_openclaw_routes(
-            openclaw_bin=openclaw_bin,
-            openclaw_home=openclaw_home,
-            allow_persist=True,
-        )
-        if synced:
-            log_info(
-                "routes auto-synced into OpenClaw config at "
-                f"`{OPENCLAW_BRIDGE_ROUTES_POINTER}`."
+        if defer_openclaw_route_resolution:
+            routes_source = "openclaw_startup_deferred"
+            routes = []
+        else:
+            routes_source, routes, synced = resolve_openclaw_routes(
+                openclaw_bin=openclaw_bin,
+                openclaw_home=openclaw_home,
+                allow_persist=True,
             )
+            if synced:
+                log_info(
+                    "routes auto-synced into OpenClaw config at "
+                    f"`{OPENCLAW_BRIDGE_ROUTES_POINTER}`."
+                )
     else:
         routes = parse_routes_optional(routes_raw)
 
@@ -2930,7 +2984,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        config = load_config(Path(args.config), args)
+        config = load_config(
+            Path(args.config),
+            args,
+            defer_openclaw_route_resolution=True,
+        )
     except Exception as err:
         print(f"config error: {err}", file=sys.stderr)
         return 2
@@ -2957,6 +3015,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     server = run_server(runtime, config.inbound_bind)
     log_info(f"listening on http://{config.inbound_bind}/inbound")
+    runtime.refresh_routes(force=True)
     log_info(
         f"polling {config.ruler_url}/api/status/feed every {config.poll_interval_seconds}s for pending approvals"
     )
