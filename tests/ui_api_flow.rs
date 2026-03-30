@@ -2971,9 +2971,7 @@ async fn openclaw_tool_preflight_expands_tilde_to_runner_managed_home() {
         "tilde path should resolve to runner-managed OpenClaw home"
     );
 
-    let host_secret = dirs::home_dir()
-        .expect("host home")
-        .join(".ssh/id_rsa");
+    let host_secret = dirs::home_dir().expect("host home").join(".ssh/id_rsa");
     let (host_code, host_payload) = call_json(
         &harness.app,
         Method::POST,
