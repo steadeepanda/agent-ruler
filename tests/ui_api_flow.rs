@@ -2936,10 +2936,15 @@ async fn openclaw_tool_preflight_blocks_direct_delivery_destination_copy() {
 }
 
 #[tokio::test]
-async fn openclaw_tool_preflight_expands_tilde_for_secret_paths() {
+async fn openclaw_tool_preflight_expands_tilde_to_runner_managed_home() {
     let harness = UiHarness::new("ui-openclaw-tilde-secrets");
+    let runtime = harness.runtime_state();
+    let expected_runner_home_secret = runtime
+        .config
+        .runtime_root
+        .join("user_data/openclaw_home/.ssh/id_rsa");
 
-    let (code, payload) = call_json(
+    let (managed_code, managed_payload) = call_json(
         &harness.app,
         Method::POST,
         "/api/openclaw/tool/preflight",
@@ -2955,9 +2960,39 @@ async fn openclaw_tool_preflight_expands_tilde_for_secret_paths() {
         })),
     )
     .await;
-    assert_eq!(code, StatusCode::OK);
-    assert_eq!(payload["status"], "denied");
-    assert_eq!(payload["reason"], "deny_secrets");
+    assert_eq!(managed_code, StatusCode::OK);
+    assert_eq!(managed_payload["status"], "allow");
+    assert_eq!(managed_payload["reason"], "allowed_by_policy");
+    assert!(
+        managed_payload["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(expected_runner_home_secret.to_string_lossy().as_ref()),
+        "tilde path should resolve to runner-managed OpenClaw home"
+    );
+
+    let host_secret = dirs::home_dir()
+        .expect("host home")
+        .join(".ssh/id_rsa");
+    let (host_code, host_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/openclaw/tool/preflight",
+        Some(json!({
+            "tool_name": "read",
+            "params": {
+                "path": host_secret.to_string_lossy()
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-host-secret-test"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(host_code, StatusCode::OK);
+    assert_eq!(host_payload["status"], "denied");
+    assert_eq!(host_payload["reason"], "deny_secrets");
 }
 
 #[tokio::test]
