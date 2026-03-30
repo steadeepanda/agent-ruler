@@ -6,43 +6,6 @@ use std::path::Path;
 use super::helpers::{deny_reason_for_zone, is_tmp_path};
 use super::PolicyEngine;
 
-/// Check if the action kind is a write operation (modifies filesystem).
-fn is_write_action(kind: ActionKind) -> bool {
-    matches!(
-        kind,
-        ActionKind::FileWrite | ActionKind::FileDelete | ActionKind::FileRename
-    )
-}
-
-/// Check if the action is a read operation (non-mutating).
-/// Reads may be hinted via metadata for tools that use FileWrite kind for reads.
-fn is_read_action(request: &ActionRequest) -> bool {
-    // Explicit read hint from tool preflight
-    if request
-        .metadata
-        .get("non_mutating_hint")
-        .map(|v| v == "read")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    // Native read action kinds would go here if we add them
-    false
-}
-
-/// Check if this is an import operation (reading from external source into workspace).
-/// Imports read from user_data but write to workspace, so they should not be blocked
-/// by user_data write denial.
-fn is_import_operation(request: &ActionRequest) -> bool {
-    // Import operations have import_src metadata and write to workspace
-    request.metadata.contains_key("import_src")
-        && request
-            .metadata
-            .get("import_dst")
-            .map(|_| true)
-            .unwrap_or(false)
-}
-
 fn targets_agent_ruler_cli(request: &ActionRequest) -> bool {
     if let Some(path) = request.path.as_ref() {
         if is_agent_ruler_token(path.to_string_lossy().as_ref()) {
@@ -122,28 +85,6 @@ impl PolicyEngine {
                     }
                 }
             }
-        }
-
-        // Doc intent enforcement for user_data zone:
-        // - Reads MAY be allowed depending on policy disposition
-        // - Writes MUST be denied - modifications must go through stage/deliver workflow
-        // This ensures agents can read user documents to simulate working in user space,
-        // but cannot directly modify them outside the workspace.
-        // Exception: Import operations read from user_data and write to workspace, which is allowed.
-        if zone == Zone::UserData
-            && is_write_action(request.kind)
-            && !is_read_action(request)
-            && !is_import_operation(request)
-        {
-            return Decision {
-                verdict: Verdict::Deny,
-                reason: ReasonCode::DenyUserDataWrite,
-                detail: format!(
-                    "write to user data zone denied (use stage/deliver workflow): {}",
-                    path.display()
-                ),
-                approval_ttl_seconds: None,
-            };
         }
 
         match self.disposition_for_zone(zone) {

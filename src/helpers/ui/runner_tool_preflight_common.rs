@@ -60,6 +60,10 @@ pub async fn run_tool_preflight_for_runner(
             Ok(path) => path,
             Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
         };
+    let runner_home = match crate::helpers::home_root_for_runner_id(&runtime, Some(runner_id)) {
+        Ok(path) => path,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
     let runner_session = match register_runner_session(
         &runtime,
         runner_id,
@@ -73,6 +77,7 @@ pub async fn run_tool_preflight_for_runner(
     let Some(action) = build_openclaw_tool_action(
         &runtime,
         &workspace_root,
+        &runner_home,
         runner_id,
         &tool_name,
         &payload.params,
@@ -343,6 +348,7 @@ fn is_read_like_openclaw_tool(tool_name: &str) -> bool {
 fn build_openclaw_tool_action(
     runtime: &RuntimeState,
     workspace_root: &Path,
+    runner_home: &Path,
     runner_id: &str,
     tool_name: &str,
     params: &JsonValue,
@@ -402,7 +408,11 @@ fn build_openclaw_tool_action(
                 &["path", "file_path", "filePath", "target", "to"],
             )?;
             action.kind = ActionKind::FileWrite;
-            action.path = Some(normalize_runner_tool_path(workspace_root, &path));
+            action.path = Some(normalize_runner_tool_path(
+                workspace_root,
+                runner_home,
+                &path,
+            ));
         }
         "delete" | "remove" | "rm" => {
             let targets = extract_path_values(
@@ -418,7 +428,11 @@ fn build_openclaw_tool_action(
             );
             let first = targets.first()?;
             action.kind = ActionKind::FileDelete;
-            action.path = Some(normalize_runner_tool_path(workspace_root, first));
+            action.path = Some(normalize_runner_tool_path(
+                workspace_root,
+                runner_home,
+                first,
+            ));
             action
                 .metadata
                 .insert("delete_count".to_string(), targets.len().to_string());
@@ -442,8 +456,16 @@ fn build_openclaw_tool_action(
                 &["to", "dst", "destination", "new_path", "newPath", "target"],
             )?;
             action.kind = ActionKind::FileRename;
-            action.path = Some(normalize_runner_tool_path(workspace_root, &destination));
-            action.secondary_path = Some(normalize_runner_tool_path(workspace_root, &source));
+            action.path = Some(normalize_runner_tool_path(
+                workspace_root,
+                runner_home,
+                &destination,
+            ));
+            action.secondary_path = Some(normalize_runner_tool_path(
+                workspace_root,
+                runner_home,
+                &source,
+            ));
         }
         "read" | "cat" => {
             let path = extract_first_param_string(
@@ -451,7 +473,11 @@ fn build_openclaw_tool_action(
                 &["path", "file_path", "filePath", "target", "from"],
             )?;
             action.kind = ActionKind::FileWrite;
-            action.path = Some(normalize_runner_tool_path(workspace_root, &path));
+            action.path = Some(normalize_runner_tool_path(
+                workspace_root,
+                runner_home,
+                &path,
+            ));
             action
                 .metadata
                 .insert("non_mutating_hint".to_string(), "read".to_string());
@@ -488,9 +514,16 @@ fn build_openclaw_tool_action(
                 } else {
                     ActionKind::FileWrite
                 };
-                action.path = Some(normalize_runner_tool_path(workspace_root, &info.dst_path));
-                action.secondary_path =
-                    Some(normalize_runner_tool_path(workspace_root, &info.src_path));
+                action.path = Some(normalize_runner_tool_path(
+                    workspace_root,
+                    runner_home,
+                    &info.dst_path,
+                ));
+                action.secondary_path = Some(normalize_runner_tool_path(
+                    workspace_root,
+                    runner_home,
+                    &info.src_path,
+                ));
                 action.metadata.insert(
                     "underlying_exec".to_string(),
                     resolved.to_string_lossy().to_string(),
@@ -510,6 +543,7 @@ fn build_openclaw_tool_action(
                 };
                 action.path = Some(normalize_runner_tool_path(
                     workspace_root,
+                    runner_home,
                     &info.target_path,
                 ));
                 action.metadata.insert(
@@ -537,6 +571,7 @@ fn build_openclaw_tool_action(
                 action.kind = ActionKind::Execute;
                 action.path = Some(normalize_runner_tool_path(
                     workspace_root,
+                    runner_home,
                     &download_exec.exec_path,
                 ));
                 action
@@ -561,6 +596,7 @@ fn build_openclaw_tool_action(
                 action.kind = ActionKind::FileWrite;
                 action.path = Some(normalize_runner_tool_path(
                     workspace_root,
+                    runner_home,
                     &redirection_target,
                 ));
                 action.metadata.insert(
@@ -1233,8 +1269,8 @@ fn is_operator_internal_path_shallow(path: &Path, runtime: &RuntimeState) -> boo
     false
 }
 
-fn normalize_runner_tool_path(workspace_root: &Path, raw: &str) -> PathBuf {
-    let expanded_home = expand_home_path(raw);
+fn normalize_runner_tool_path(workspace_root: &Path, runner_home: &Path, raw: &str) -> PathBuf {
+    let expanded_home = expand_home_path(raw, runner_home);
     let candidate = expanded_home.unwrap_or_else(|| PathBuf::from(raw));
     if candidate.is_absolute() {
         candidate
@@ -1257,17 +1293,22 @@ fn is_workspace_scoped_path(path: &Path, workspace_root: &Path) -> bool {
     false
 }
 
-fn expand_home_path(raw: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+fn expand_home_path(raw: &str, runner_home: &Path) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed == "~" {
-        return Some(home);
+        return Some(runner_home.to_path_buf());
     }
     if let Some(suffix) = trimmed
         .strip_prefix("~/")
         .or_else(|| trimmed.strip_prefix("~\\"))
     {
-        return Some(home.join(suffix));
+        return Some(runner_home.join(suffix));
+    }
+    if let Some(suffix) = trimmed
+        .strip_prefix("$HOME/")
+        .or_else(|| trimmed.strip_prefix("$HOME\\"))
+    {
+        return Some(runner_home.join(suffix));
     }
     None
 }

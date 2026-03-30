@@ -154,6 +154,21 @@ def log_info(message: str) -> None:
     print(f"[bridge] {message}", flush=True)
 
 
+def managed_openclaw_env(openclaw_home: Optional[str]) -> Dict[str, str]:
+    env = os.environ.copy()
+    home = (openclaw_home or "").strip()
+    if not home:
+        return env
+
+    env["OPENCLAW_HOME"] = home
+    env["HOME"] = home
+    env["XDG_CONFIG_HOME"] = str(Path(home) / ".config")
+    env["XDG_DATA_HOME"] = str(Path(home) / ".local" / "share")
+    env["XDG_STATE_HOME"] = str(Path(home) / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(Path(home) / ".cache")
+    return env
+
+
 def already_resolved_status_from_error(detail: str) -> Optional[str]:
     """Parse duplicate approval-decision errors into a normalized status."""
     lowered = (detail or "").strip().lower()
@@ -491,9 +506,7 @@ class OpenClawMessenger:
 
     def _read_openclaw_config_string(self, path: str) -> Optional[str]:
         cmd = [self.openclaw_bin, "config", "get", path, "--json"]
-        env = os.environ.copy()
-        if self.openclaw_home:
-            env["OPENCLAW_HOME"] = self.openclaw_home
+        env = managed_openclaw_env(self.openclaw_home)
         try:
             run = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
         except OSError:
@@ -522,7 +535,13 @@ class OpenClawMessenger:
                 "cmd": cmd,
             }
 
-        run = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        run = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=managed_openclaw_env(self.openclaw_home),
+        )
         if run.returncode != 0:
             stderr = run.stderr.strip() or run.stdout.strip() or "unknown openclaw command failure"
             raise BridgeError(f"openclaw command failed: {stderr}")
@@ -2413,9 +2432,7 @@ def write_routes_to_openclaw_config(
         payload,
         "--json",
     ]
-    env = os.environ.copy()
-    if openclaw_home:
-        env["OPENCLAW_HOME"] = openclaw_home
+    env = managed_openclaw_env(openclaw_home)
     try:
         result = subprocess.run(
             cmd,
@@ -2530,9 +2547,7 @@ def read_routes_from_openclaw_config(
         OPENCLAW_BRIDGE_ROUTES_POINTER,
         "--json",
     ]
-    env = os.environ.copy()
-    if openclaw_home:
-        env["OPENCLAW_HOME"] = openclaw_home
+    env = managed_openclaw_env(openclaw_home)
     try:
         result = subprocess.run(
             cmd,
@@ -2577,9 +2592,7 @@ def read_openclaw_channels_config(
     openclaw_home: Optional[str],
 ) -> Dict[str, Any]:
     cmd = [openclaw_bin, "config", "get", "channels", "--json"]
-    env = os.environ.copy()
-    if openclaw_home:
-        env["OPENCLAW_HOME"] = openclaw_home
+    env = managed_openclaw_env(openclaw_home)
     try:
         result = subprocess.run(
             cmd,

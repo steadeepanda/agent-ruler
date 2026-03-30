@@ -22,9 +22,10 @@ use crate::helpers::runners::openclaw::setup_config::{
     set_gateway_mode_local, set_workspace,
 };
 use crate::runners::{
-    HostInstall, ImportReport, IntegrationOption, IntegrationSelection, ProvisionedPaths,
-    RunnerAdapter, RunnerAssociation, RunnerKind, RunnerMissingDecision, RunnerMissingState,
-    OPENCLAW_HOME_DIR_NAME, OPENCLAW_WORKSPACE_DIR_NAME, RUNTIME_USER_DATA_DIR_NAME,
+    apply_runner_env_to_command, HostInstall, ImportReport, IntegrationOption,
+    IntegrationSelection, ProvisionedPaths, RunnerAdapter, RunnerAssociation, RunnerKind,
+    RunnerMissingDecision, RunnerMissingState, OPENCLAW_HOME_DIR_NAME, OPENCLAW_WORKSPACE_DIR_NAME,
+    RUNTIME_USER_DATA_DIR_NAME,
 };
 use crate::utils::resolve_command_path;
 
@@ -1298,13 +1299,21 @@ fn bootstrap_managed_home(paths: &ProvisionedPaths) -> Result<()> {
         );
         println!("setup: run interactive bootstrap now? [Y/n]");
         if prompt_yes_no(true)? {
-            let status = Command::new("openclaw")
-                .env("OPENCLAW_HOME", &paths.managed_home)
+            let mut command = Command::new("openclaw");
+            command
                 .arg("onboard")
                 .arg("--mode")
                 .arg("local")
                 .arg("--workspace")
-                .arg(&paths.managed_workspace)
+                .arg(&paths.managed_workspace);
+            apply_runner_env_to_command(
+                &mut command,
+                RunnerKind::Openclaw,
+                &paths.managed_home,
+                "127.0.0.1:4622",
+                crate::config::DEFAULT_APPROVAL_WAIT_TIMEOUT_SECS,
+            );
+            let status = command
                 .status()
                 .context("run interactive OpenClaw bootstrap")?;
             if !status.success() {
@@ -1332,9 +1341,16 @@ fn bootstrap_managed_home(paths: &ProvisionedPaths) -> Result<()> {
 }
 
 fn run_openclaw_command(paths: &ProvisionedPaths, args: &[String]) -> Result<std::process::Output> {
-    Command::new("openclaw")
-        .env("OPENCLAW_HOME", &paths.managed_home)
-        .args(args)
+    let mut command = Command::new("openclaw");
+    command.args(args);
+    apply_runner_env_to_command(
+        &mut command,
+        RunnerKind::Openclaw,
+        &paths.managed_home,
+        "127.0.0.1:4622",
+        crate::config::DEFAULT_APPROVAL_WAIT_TIMEOUT_SECS,
+    );
+    command
         .output()
         .with_context(|| format!("run `openclaw {}`", args.join(" ")))
 }
@@ -1450,11 +1466,16 @@ fn extract_port_from_token(token: &str) -> Option<u16> {
 }
 
 fn query_gateway_port(managed_home: &Path) -> Option<u16> {
-    let output = Command::new("openclaw")
-        .env("OPENCLAW_HOME", managed_home)
-        .args(["config", "get", "gateway.port"])
-        .output()
-        .ok()?;
+    let mut command = Command::new("openclaw");
+    command.args(["config", "get", "gateway.port"]);
+    apply_runner_env_to_command(
+        &mut command,
+        RunnerKind::Openclaw,
+        managed_home,
+        "127.0.0.1:4622",
+        crate::config::DEFAULT_APPROVAL_WAIT_TIMEOUT_SECS,
+    );
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

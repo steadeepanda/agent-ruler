@@ -338,6 +338,105 @@ fn opencode_run_uses_managed_xdg_paths() {
 }
 
 #[test]
+fn openclaw_run_uses_managed_home_and_xdg_paths() {
+    let project = TestRuntimeDir::new("runner-structured-openclaw-home-project");
+    let runtime_root = TestRuntimeDir::new("runner-structured-openclaw-home-runtime");
+    let runtime = configure_runtime_with_runner(&project, &runtime_root, RunnerKind::Openclaw);
+    let managed_home = runtime
+        .config
+        .runner
+        .as_ref()
+        .expect("runner config")
+        .managed_home
+        .to_string_lossy()
+        .to_string();
+
+    write_runner_shim(
+        runner_workspace(&runtime),
+        "openclaw",
+        "printf '{\"openclaw_home\":\"%s\",\"home\":\"%s\",\"xdg_config\":\"%s\",\"xdg_data\":\"%s\",\"xdg_state\":\"%s\",\"xdg_cache\":\"%s\"}\\n' \"$OPENCLAW_HOME\" \"$HOME\" \"$XDG_CONFIG_HOME\" \"$XDG_DATA_HOME\" \"$XDG_STATE_HOME\" \"$XDG_CACHE_HOME\"",
+    );
+    write_runner_shim(
+        runner_workspace(&runtime),
+        "tailscale",
+        "echo >&2 'tailscale disabled in test'; exit 1",
+    );
+
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let merged_path = format!("{}:{}", runner_workspace(&runtime).display(), path_env);
+
+    let output = Command::new(bin_path())
+        .current_dir(project.path())
+        .arg("--runtime-dir")
+        .arg(runtime_root.path())
+        .args(["run", "--", "openclaw", "status"])
+        .env("AGENT_RULER_ROOT", env!("CARGO_MANIFEST_DIR"))
+        .env("PATH", merged_path)
+        .env("OPENCLAW_HOME", "/tmp/host-openclaw")
+        .env("HOME", "/tmp/host-home")
+        .env("XDG_CONFIG_HOME", "/tmp/host-config")
+        .env("XDG_DATA_HOME", "/tmp/host-data")
+        .env("XDG_STATE_HOME", "/tmp/host-state")
+        .env("XDG_CACHE_HOME", "/tmp/host-cache")
+        .output()
+        .expect("run openclaw command with host overrides");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if confinement_env_error(&stderr) {
+            eprintln!("skipping managed openclaw home assertion due host limits: {stderr}");
+            return;
+        }
+    }
+    assert!(
+        output.status.success(),
+        "openclaw run should succeed; stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_json_line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .expect("expected json output line from shim");
+    let value: serde_json::Value =
+        serde_json::from_str(first_json_line).expect("parse shim json output");
+    let env_json = value
+        .as_object()
+        .expect("json object output from shim should be present");
+    let expected_config = format!("{managed_home}/.config");
+    let expected_data = format!("{managed_home}/.local/share");
+    let expected_state = format!("{managed_home}/.local/state");
+    let expected_cache = format!("{managed_home}/.cache");
+
+    assert_eq!(
+        env_json.get("openclaw_home").and_then(|item| item.as_str()),
+        Some(managed_home.as_str())
+    );
+    assert_eq!(
+        env_json.get("home").and_then(|item| item.as_str()),
+        Some(managed_home.as_str())
+    );
+    assert_eq!(
+        env_json.get("xdg_config").and_then(|item| item.as_str()),
+        Some(expected_config.as_str())
+    );
+    assert_eq!(
+        env_json.get("xdg_data").and_then(|item| item.as_str()),
+        Some(expected_data.as_str())
+    );
+    assert_eq!(
+        env_json.get("xdg_state").and_then(|item| item.as_str()),
+        Some(expected_state.as_str())
+    );
+    assert_eq!(
+        env_json.get("xdg_cache").and_then(|item| item.as_str()),
+        Some(expected_cache.as_str())
+    );
+}
+
+#[test]
 fn claudecode_run_fails_with_login_guidance_when_managed_auth_is_missing() {
     let project = TestRuntimeDir::new("runner-structured-claude-auth-project");
     let runtime_root = TestRuntimeDir::new("runner-structured-claude-auth-runtime");

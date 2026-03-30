@@ -6,7 +6,7 @@ title: Security Policy
 # Security Policy
 
 ## Supported Versions
-`v0.1.9-1` (Linux-first) is currently maintained.
+`v0.1.9-2` (Linux-first) is currently maintained.
 
 ## Reporting a Vulnerability
 Please report vulnerabilities privately by opening a security advisory or contacting maintainers directly before public disclosure.
@@ -46,7 +46,7 @@ Recommendations:
 - Both modes reduce security posture and are explicitly marked in receipts.
 
 ## Current Security Limitations
-- v0.1.9-1 enforcement requires launching via Agent Ruler runner/API flows.
+- v0.1.9-2 enforcement requires launching via Agent Ruler runner/API flows.
 - Linux confinement currently uses user-space namespace controls (`bubblewrap`) without kernel driver support.
 - Some hosts/VMs may restrict unprivileged user namespaces (for example `setting up uid map: Permission denied`).
 - Windows enforcement is planned for a later version.
@@ -54,7 +54,7 @@ Recommendations:
 ## Prompt Injection and Internet Access
 Prompt injection risk is treated as a policy-governed execution risk, not as trusted instruction following.
 
-Current protections in v0.1.9-1:
+Current protections in v0.1.9-2:
 - Network default-deny via policy (`rules.network.default_deny=true` by default).
 - Bubblewrap network namespace isolation (`--unshare-net`) when default-deny is active.
 - Host allowlist enforcement for explicit command-line egress checks, including internet-enabled mode when an allowlist is configured.
@@ -71,4 +71,4 @@ Recommended hardening when enabling internet:
 - Review receipts during and after runs for unexpected network operations.
 
 Limitation note:
-- v0.1.9-1 does not provide syscall-complete outbound mediation for arbitrary binaries without kernel-level hooks; command preflight primarily covers explicit URL-bearing command patterns.
+- v0.1.9-2 does not provide syscall-complete outbound mediation for arbitrary binaries without kernel-level hooks; command preflight primarily covers explicit URL-bearing command patterns.

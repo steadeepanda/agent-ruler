@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -5,7 +6,9 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config::RuntimeState;
 use crate::export_gate::{commit_export, ExportPlan};
-use crate::runners::{RunnerKind, RUNTIME_RUNNERS_DIR_NAME, RUNTIME_USER_DATA_DIR_NAME};
+use crate::runners::{
+    RunnerKind, OPENCLAW_HOME_DIR_NAME, RUNTIME_RUNNERS_DIR_NAME, RUNTIME_USER_DATA_DIR_NAME,
+};
 use crate::staged_exports::StagedExportStore;
 
 const BYPASS_ACK_HINT: &str =
@@ -48,12 +51,48 @@ pub fn workspace_root_for_runner(runtime: &RuntimeState, runner: Option<RunnerKi
     }
 }
 
+pub fn home_root_for_runner(runtime: &RuntimeState, runner: Option<RunnerKind>) -> PathBuf {
+    let selected = runner.or_else(|| runtime.config.runner.as_ref().map(|item| item.kind));
+    let Some(kind) = selected else {
+        return host_home_fallback(runtime);
+    };
+
+    if let Some(configured) = runtime
+        .config
+        .runner
+        .as_ref()
+        .filter(|item| item.kind == kind)
+    {
+        return configured.managed_home.clone();
+    }
+
+    match kind {
+        RunnerKind::Openclaw => runtime
+            .config
+            .runtime_root
+            .join(RUNTIME_USER_DATA_DIR_NAME)
+            .join(OPENCLAW_HOME_DIR_NAME),
+        RunnerKind::Claudecode | RunnerKind::Opencode => runtime
+            .config
+            .runtime_root
+            .join(RUNTIME_USER_DATA_DIR_NAME)
+            .join(RUNTIME_RUNNERS_DIR_NAME)
+            .join(kind.id())
+            .join("home"),
+    }
+}
+
 pub fn workspace_root_for_runner_id(
     runtime: &RuntimeState,
     runner_id: Option<&str>,
 ) -> Result<PathBuf> {
     let kind = normalize_requested_runner(runner_id)?;
     Ok(workspace_root_for_runner(runtime, kind))
+}
+
+pub fn home_root_for_runner_id(runtime: &RuntimeState, runner_id: Option<&str>) -> Result<PathBuf> {
+    let kind = normalize_requested_runner(runner_id)?;
+    Ok(home_root_for_runner(runtime, kind))
 }
 
 pub fn resolve_workspace_src(
@@ -216,6 +255,13 @@ pub fn ensure_bypass_ack(ack: bool) -> Result<()> {
     }
 
     Err(anyhow!(BYPASS_ACK_HINT))
+}
+
+fn host_home_fallback(runtime: &RuntimeState) -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| runtime.config.workspace.clone())
 }
 
 pub fn sanitize_file_name(input: &str) -> String {

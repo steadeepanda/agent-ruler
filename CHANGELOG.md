@@ -2,6 +2,22 @@
 
 All notable user-facing changes are documented here.
 
+## [v0.1.9-2] - 2026-03-30
+
+### Policy and OpenClaw runtime fixes
+- Fixed filesystem policy enforcement so `user_data` writes now follow the selected profile/rule disposition instead of being hard-denied by a stale blanket rule.
+- Fixed OpenClaw runner/tool path handling so `~/...` and `$HOME/...` resolve against the Agent Ruler-managed OpenClaw home during tool preflight, matching the actual managed runner environment.
+- Hardened OpenClaw managed runtime wiring so Agent Ruler now normalizes `HOME` plus `XDG_*` alongside `OPENCLAW_HOME` for OpenClaw execution and bridge-side OpenClaw CLI calls, reducing drift back to `~/.openclaw`.
+
+### Update/version comparison
+- Fixed release comparison logic so numeric release suffixes such as `v0.1.9-1` and `v0.1.9-2` are treated as newer revision releases instead of older prereleases.
+- Fixed WebUI update notifications so older tags are no longer shown as available updates over newer installed revisions.
+
+### Regression coverage
+- Added policy-engine coverage for `user_data` write allow/approval/deny behavior.
+- Added OpenClaw runner/tool regressions covering managed-home tilde resolution, managed env injection, bridge-side env propagation, and command-level managed home/XDG behavior.
+- Added updater regressions for numeric release-suffix parsing and ordering.
+
 ## [v0.1.9-1] - 2026-03-29
 
 ### OpenClaw bridge startup hardening

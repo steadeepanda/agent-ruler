@@ -54,9 +54,9 @@ use ::agent_ruler::runners::opencode::{
     enforce_managed_governance_config_guard, ensure_managed_auth_seed,
 };
 use ::agent_ruler::runners::{
-    apply_runner_env_overrides, command_runner_kind, configured_runner_targets_command,
-    reconcile_runner_executable_with_options, workspace_root_for_command, RunnerAvailabilityState,
-    RunnerCheckOptions, RunnerKind,
+    apply_runner_env_overrides, apply_runner_env_to_command, command_runner_kind,
+    configured_runner_targets_command, reconcile_runner_executable_with_options,
+    workspace_root_for_command, RunnerAvailabilityState, RunnerCheckOptions, RunnerKind,
 };
 use ::agent_ruler::staged_exports::{StagedExportState, StagedExportStore};
 use ::agent_ruler::ui;
@@ -1223,38 +1223,48 @@ fn configure_managed_openclaw_approvals_hook(
         serde_json::to_string(&bridge_url).context("serialize inbound bridge URL for OpenClaw")?;
     let managed_home = managed_openclaw_home(runtime);
 
-    let enable_output = Command::new("openclaw")
-        .args(["hooks", "enable", OPENCLAW_APPROVALS_HOOK_ID])
-        .env("OPENCLAW_HOME", &managed_home)
-        .output()
-        .with_context(|| {
-            format!(
-                "run `openclaw hooks enable {}` with OPENCLAW_HOME={}",
-                OPENCLAW_APPROVALS_HOOK_ID,
-                managed_home.display()
-            )
-        })?;
+    let mut enable_cmd = Command::new("openclaw");
+    enable_cmd.args(["hooks", "enable", OPENCLAW_APPROVALS_HOOK_ID]);
+    apply_runner_env_to_command(
+        &mut enable_cmd,
+        RunnerKind::Openclaw,
+        &managed_home,
+        &runtime.config.ui_bind,
+        runtime.config.approval_wait_timeout_secs,
+    );
+    let enable_output = enable_cmd.output().with_context(|| {
+        format!(
+            "run `openclaw hooks enable {}` with OPENCLAW_HOME={}",
+            OPENCLAW_APPROVALS_HOOK_ID,
+            managed_home.display()
+        )
+    })?;
     if !enable_output.status.success() {
         return Err(anyhow!(command_failure_detail(&enable_output)));
     }
 
-    let set_env_output = Command::new("openclaw")
-        .args([
-            "config",
-            "set",
+    let mut set_env_cmd = Command::new("openclaw");
+    set_env_cmd.args([
+        "config",
+        "set",
+        OPENCLAW_APPROVALS_HOOK_BRIDGE_URL_POINTER,
+        &bridge_url_json,
+        "--json",
+    ]);
+    apply_runner_env_to_command(
+        &mut set_env_cmd,
+        RunnerKind::Openclaw,
+        &managed_home,
+        &runtime.config.ui_bind,
+        runtime.config.approval_wait_timeout_secs,
+    );
+    let set_env_output = set_env_cmd.output().with_context(|| {
+        format!(
+            "run `openclaw config set {}` with OPENCLAW_HOME={}",
             OPENCLAW_APPROVALS_HOOK_BRIDGE_URL_POINTER,
-            &bridge_url_json,
-            "--json",
-        ])
-        .env("OPENCLAW_HOME", &managed_home)
-        .output()
-        .with_context(|| {
-            format!(
-                "run `openclaw config set {}` with OPENCLAW_HOME={}",
-                OPENCLAW_APPROVALS_HOOK_BRIDGE_URL_POINTER,
-                managed_home.display()
-            )
-        })?;
+            managed_home.display()
+        )
+    })?;
     if !set_env_output.status.success() {
         return Err(anyhow!(command_failure_detail(&set_env_output)));
     }
@@ -1387,23 +1397,28 @@ fn write_managed_openclaw_bridge_routes(
     let managed_home = managed_openclaw_home(runtime);
     let serialized =
         serde_json::to_string(routes).context("serialize bridge routes for OpenClaw config set")?;
-    let output = Command::new("openclaw")
-        .args([
-            "config",
-            "set",
+    let mut set_routes_cmd = Command::new("openclaw");
+    set_routes_cmd.args([
+        "config",
+        "set",
+        OPENCLAW_BRIDGE_ROUTES_POINTER,
+        &serialized,
+        "--json",
+    ]);
+    apply_runner_env_to_command(
+        &mut set_routes_cmd,
+        RunnerKind::Openclaw,
+        &managed_home,
+        &runtime.config.ui_bind,
+        runtime.config.approval_wait_timeout_secs,
+    );
+    let output = set_routes_cmd.output().with_context(|| {
+        format!(
+            "run `openclaw config set {}` with OPENCLAW_HOME={}",
             OPENCLAW_BRIDGE_ROUTES_POINTER,
-            &serialized,
-            "--json",
-        ])
-        .env("OPENCLAW_HOME", &managed_home)
-        .output()
-        .with_context(|| {
-            format!(
-                "run `openclaw config set {}` with OPENCLAW_HOME={}",
-                OPENCLAW_BRIDGE_ROUTES_POINTER,
-                managed_home.display()
-            )
-        })?;
+            managed_home.display()
+        )
+    })?;
 
     if output.status.success() {
         return Ok(());
@@ -1422,17 +1437,22 @@ fn managed_openclaw_bridge_routes_count(
     runtime: &::agent_ruler::config::RuntimeState,
 ) -> Result<Option<usize>> {
     let managed_home = managed_openclaw_home(runtime);
-    let output = Command::new("openclaw")
-        .args(["config", "get", OPENCLAW_BRIDGE_ROUTES_POINTER, "--json"])
-        .env("OPENCLAW_HOME", &managed_home)
-        .output()
-        .with_context(|| {
-            format!(
-                "run `openclaw config get {}` with OPENCLAW_HOME={}",
-                OPENCLAW_BRIDGE_ROUTES_POINTER,
-                managed_home.display()
-            )
-        })?;
+    let mut get_routes_cmd = Command::new("openclaw");
+    get_routes_cmd.args(["config", "get", OPENCLAW_BRIDGE_ROUTES_POINTER, "--json"]);
+    apply_runner_env_to_command(
+        &mut get_routes_cmd,
+        RunnerKind::Openclaw,
+        &managed_home,
+        &runtime.config.ui_bind,
+        runtime.config.approval_wait_timeout_secs,
+    );
+    let output = get_routes_cmd.output().with_context(|| {
+        format!(
+            "run `openclaw config get {}` with OPENCLAW_HOME={}",
+            OPENCLAW_BRIDGE_ROUTES_POINTER,
+            managed_home.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

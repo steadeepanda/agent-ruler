@@ -190,7 +190,7 @@ mod tests {
 
     use chrono::Utc;
 
-    use crate::config::Policy;
+    use crate::config::{Policy, RuleDisposition};
     use crate::model::{ActionKind, ActionRequest, ProcessContext, ReasonCode, Verdict, Zone};
 
     use super::PolicyEngine;
@@ -254,6 +254,40 @@ mod tests {
         let (decision, _) = engine.evaluate(&req);
         assert_eq!(decision.verdict, Verdict::RequireApproval);
         assert_eq!(decision.reason, ReasonCode::ApprovalRequiredExport);
+    }
+
+    #[test]
+    fn user_data_write_follows_configured_zone_disposition() {
+        let mut policy = base_policy().expanded(PathBuf::from("/tmp/work").as_path());
+        policy.zones.user_data_paths = vec!["/tmp/managed-openclaw-home".to_string()];
+
+        let req = request(
+            ActionKind::FileWrite,
+            Some(PathBuf::from(
+                "/tmp/managed-openclaw-home/.openclaw/openclaw.json",
+            )),
+        );
+
+        policy.rules.filesystem.user_data = RuleDisposition::Allow;
+        let allow_engine = PolicyEngine::new(policy.clone(), PathBuf::from("/tmp/work"));
+        let (allow_decision, allow_zone) = allow_engine.evaluate(&req);
+        assert_eq!(allow_zone, Some(Zone::UserData));
+        assert_eq!(allow_decision.verdict, Verdict::Allow);
+        assert_eq!(allow_decision.reason, ReasonCode::AllowedByPolicy);
+
+        policy.rules.filesystem.user_data = RuleDisposition::Approval;
+        let approval_engine = PolicyEngine::new(policy.clone(), PathBuf::from("/tmp/work"));
+        let (approval_decision, approval_zone) = approval_engine.evaluate(&req);
+        assert_eq!(approval_zone, Some(Zone::UserData));
+        assert_eq!(approval_decision.verdict, Verdict::RequireApproval);
+        assert_eq!(approval_decision.reason, ReasonCode::ApprovalRequiredZone2);
+
+        policy.rules.filesystem.user_data = RuleDisposition::Deny;
+        let deny_engine = PolicyEngine::new(policy, PathBuf::from("/tmp/work"));
+        let (deny_decision, deny_zone) = deny_engine.evaluate(&req);
+        assert_eq!(deny_zone, Some(Zone::UserData));
+        assert_eq!(deny_decision.verdict, Verdict::Deny);
+        assert_eq!(deny_decision.reason, ReasonCode::DenyUserDataWrite);
     }
 
     #[test]

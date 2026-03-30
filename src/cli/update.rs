@@ -65,7 +65,13 @@ struct SemverCore {
     major: u64,
     minor: u64,
     patch: u64,
-    pre_release: Option<String>,
+    suffix: Option<SemverSuffix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SemverSuffix {
+    PostRelease(Vec<u64>),
+    PreRelease(String),
 }
 
 pub fn run_update(
@@ -321,8 +327,8 @@ fn is_newer_tag(current_tag: &str, latest_tag: &str) -> bool {
 
 fn parse_semver_core(tag: &str) -> Option<SemverCore> {
     let trimmed = tag.trim().trim_start_matches('v');
-    let (core, pre_release) = if let Some((left, right)) = trimmed.split_once('-') {
-        (left, Some(right.to_string()))
+    let (core, suffix) = if let Some((left, right)) = trimmed.split_once('-') {
+        (left, parse_semver_suffix(right))
     } else {
         (trimmed, None)
     };
@@ -337,8 +343,25 @@ fn parse_semver_core(tag: &str) -> Option<SemverCore> {
         major,
         minor,
         patch,
-        pre_release,
+        suffix,
     })
+}
+
+fn parse_semver_suffix(raw: &str) -> Option<SemverSuffix> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let numeric_parts = trimmed
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>();
+    if let Some(parts) = numeric_parts {
+        return Some(SemverSuffix::PostRelease(parts));
+    }
+
+    Some(SemverSuffix::PreRelease(trimmed.to_string()))
 }
 
 impl PartialOrd for SemverCore {
@@ -361,11 +384,24 @@ impl Ord for SemverCore {
             std::cmp::Ordering::Equal => {}
             order => return order,
         }
-        match (&self.pre_release, &other.pre_release) {
+        match (&self.suffix, &other.suffix) {
             (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (Some(left), Some(right)) => left.cmp(right),
+            (None, Some(SemverSuffix::PreRelease(_))) => std::cmp::Ordering::Greater,
+            (None, Some(SemverSuffix::PostRelease(_))) => std::cmp::Ordering::Less,
+            (Some(SemverSuffix::PreRelease(_)), None) => std::cmp::Ordering::Less,
+            (Some(SemverSuffix::PostRelease(_)), None) => std::cmp::Ordering::Greater,
+            (Some(SemverSuffix::PostRelease(left)), Some(SemverSuffix::PostRelease(right))) => {
+                left.cmp(right)
+            }
+            (Some(SemverSuffix::PreRelease(left)), Some(SemverSuffix::PreRelease(right))) => {
+                left.cmp(right)
+            }
+            (Some(SemverSuffix::PreRelease(_)), Some(SemverSuffix::PostRelease(_))) => {
+                std::cmp::Ordering::Less
+            }
+            (Some(SemverSuffix::PostRelease(_)), Some(SemverSuffix::PreRelease(_))) => {
+                std::cmp::Ordering::Greater
+            }
         }
     }
 }
@@ -485,7 +521,7 @@ fn process_exists(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_tag, normalize_release_tag, parse_semver_core};
+    use super::{is_newer_tag, normalize_release_tag, parse_semver_core, SemverSuffix};
 
     #[test]
     fn normalize_release_tag_adds_v_prefix() {
@@ -499,7 +535,22 @@ mod tests {
         assert_eq!(parsed.major, 1);
         assert_eq!(parsed.minor, 2);
         assert_eq!(parsed.patch, 3);
-        assert_eq!(parsed.pre_release.as_deref(), Some("rc.1"));
+        match parsed.suffix {
+            Some(SemverSuffix::PreRelease(value)) => assert_eq!(value, "rc.1"),
+            other => panic!("expected prerelease suffix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn semver_parser_treats_numeric_suffix_as_post_release_revision() {
+        let parsed = parse_semver_core("v0.1.9-2").expect("parse semver");
+        assert_eq!(parsed.major, 0);
+        assert_eq!(parsed.minor, 1);
+        assert_eq!(parsed.patch, 9);
+        match parsed.suffix {
+            Some(SemverSuffix::PostRelease(parts)) => assert_eq!(parts, vec![2]),
+            other => panic!("expected post-release suffix, got {other:?}"),
+        }
     }
 
     #[test]
@@ -507,5 +558,9 @@ mod tests {
         assert!(is_newer_tag("v0.1.6", "v0.1.7"));
         assert!(!is_newer_tag("v0.1.7", "v0.1.6"));
         assert!(!is_newer_tag("v0.1.7", "v0.1.7"));
+        assert!(!is_newer_tag("v0.1.9-1", "v0.1.9"));
+        assert!(is_newer_tag("v0.1.9", "v0.1.9-1"));
+        assert!(is_newer_tag("v0.1.9-1", "v0.1.9-2"));
+        assert!(!is_newer_tag("v0.1.9-2", "v0.1.9-1"));
     }
 }

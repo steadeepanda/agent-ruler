@@ -32,7 +32,7 @@ If you want the full story (and get the vibe), read: **[about this project](./ab
 <details>
 <summary><strong>Control Panel WebUI Showcase</strong></summary>
 
-This recording shows the redesigned Control Panel flow for `v0.1.9-1`.
+This recording shows the redesigned Control Panel flow for `v0.1.9-2`.
 The clip itself still shows `v0.1.8` in the UI because I forgot to update the version label before exporting it.
 
 <p align="center">

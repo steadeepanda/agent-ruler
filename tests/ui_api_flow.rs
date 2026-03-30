@@ -7,8 +7,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use agent_ruler::approvals::ApprovalStore;
-use agent_ruler::config::{init_layout, load_runtime, save_config, RuntimeState, CONFIG_FILE_NAME};
-use agent_ruler::helpers::workspace_root_for_runner_id;
+use agent_ruler::config::{
+    init_layout, load_runtime, save_config, save_policy, RuntimeState, CONFIG_FILE_NAME,
+};
+use agent_ruler::helpers::{apply_profile_preset, workspace_root_for_runner_id};
 use agent_ruler::model::{
     ActionKind, ActionRequest, Decision, ProcessContext, ReasonCode, Receipt, Verdict,
 };
@@ -2532,6 +2534,121 @@ async fn openclaw_tool_preflight_normalizes_tool_name_aliases() {
     assert_eq!(deny_payload["status"], "denied");
     assert_eq!(deny_payload["blocked"], true);
     assert_eq!(deny_payload["reason"], "deny_system_critical");
+}
+
+#[tokio::test]
+async fn openclaw_tool_preflight_uses_managed_home_and_allows_user_data_write_in_strict() {
+    let harness = UiHarness::new("ui-openclaw-managed-home-strict");
+    let runtime = harness.runtime_state();
+    persist_runner_association(
+        &runtime,
+        RunnerKind::Openclaw,
+        runtime.config.workspace.clone(),
+    );
+
+    let updated = harness.runtime_state();
+    let managed_home = updated
+        .config
+        .runner
+        .as_ref()
+        .expect("configured openclaw runner")
+        .managed_home
+        .clone();
+    let expected_path = managed_home.join(".openclaw/openclaw.json");
+    fs::create_dir_all(expected_path.parent().expect("managed config parent"))
+        .expect("create managed openclaw config dir");
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/openclaw/tool/preflight",
+        Some(json!({
+            "tool_name": "write",
+            "params": {
+                "path": "~/.openclaw/openclaw.json",
+                "content": "{\"gateway\":{\"mode\":\"local\"}}"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-managed-home-strict"
+            }
+        })),
+    )
+    .await;
+
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "allow");
+    assert_eq!(payload["blocked"], false);
+    assert_eq!(payload["reason"], "allowed_by_policy");
+
+    let receipts_raw = fs::read_to_string(updated.config.receipts_file).expect("read receipts");
+    assert!(
+        receipts_raw.contains(expected_path.to_string_lossy().as_ref()),
+        "expected tool path to resolve inside managed OpenClaw home"
+    );
+    let host_default = PathBuf::from(std::env::var("HOME").expect("host HOME"))
+        .join(".openclaw/openclaw.json")
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        !receipts_raw.contains(&host_default),
+        "tool path should not resolve against host default OpenClaw home"
+    );
+}
+
+#[tokio::test]
+async fn openclaw_tool_preflight_allows_user_data_write_in_coding_nerd_profile() {
+    let harness = UiHarness::new("ui-openclaw-managed-home-coding-nerd");
+    let runtime = harness.runtime_state();
+    persist_runner_association(
+        &runtime,
+        RunnerKind::Openclaw,
+        runtime.config.workspace.clone(),
+    );
+
+    let mut updated = harness.runtime_state();
+    apply_profile_preset(&mut updated.policy, "coding_nerd").expect("apply coding_nerd profile");
+    save_policy(&updated.config.policy_file, &updated.policy).expect("save coding_nerd policy");
+
+    let managed_home = updated
+        .config
+        .runner
+        .as_ref()
+        .expect("configured openclaw runner")
+        .managed_home
+        .clone();
+    let expected_path = managed_home.join(".openclaw/agents/main/agent/models.json");
+    fs::create_dir_all(expected_path.parent().expect("managed models parent"))
+        .expect("create managed models dir");
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/openclaw/tool/preflight",
+        Some(json!({
+            "tool_name": "write",
+            "params": {
+                "path": "~/.openclaw/agents/main/agent/models.json",
+                "content": "{\"models\":[]}"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-managed-home-coding-nerd"
+            }
+        })),
+    )
+    .await;
+
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "allow");
+    assert_eq!(payload["blocked"], false);
+    assert_eq!(payload["reason"], "allowed_by_policy");
+
+    let receipts_raw = fs::read_to_string(updated.config.receipts_file).expect("read receipts");
+    assert!(
+        receipts_raw.contains(expected_path.to_string_lossy().as_ref()),
+        "expected coding_nerd write to resolve inside managed OpenClaw home"
+    );
 }
 
 /// Test that exec commands with destructive file operations (rm) are subject to

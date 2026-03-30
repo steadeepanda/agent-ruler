@@ -1363,6 +1363,19 @@ class BridgeConfigLoadTests(unittest.TestCase):
 
         kwargs = run_mock.call_args.kwargs
         self.assertEqual(kwargs["env"]["OPENCLAW_HOME"], "/tmp/managed-openclaw-home")
+        self.assertEqual(kwargs["env"]["HOME"], "/tmp/managed-openclaw-home")
+        self.assertEqual(
+            kwargs["env"]["XDG_CONFIG_HOME"], "/tmp/managed-openclaw-home/.config"
+        )
+        self.assertEqual(
+            kwargs["env"]["XDG_DATA_HOME"], "/tmp/managed-openclaw-home/.local/share"
+        )
+        self.assertEqual(
+            kwargs["env"]["XDG_STATE_HOME"], "/tmp/managed-openclaw-home/.local/state"
+        )
+        self.assertEqual(
+            kwargs["env"]["XDG_CACHE_HOME"], "/tmp/managed-openclaw-home/.cache"
+        )
 
     @patch("bridge.openclaw.channel_bridge.subprocess.run")
     def test_load_config_discovers_openclaw_home_from_agent_ruler_status(self, run_mock):
@@ -1415,6 +1428,10 @@ class BridgeConfigLoadTests(unittest.TestCase):
         second_call_kwargs = run_mock.call_args_list[1].kwargs
         self.assertEqual(
             second_call_kwargs["env"]["OPENCLAW_HOME"],
+            "/tmp/discovered-openclaw-home",
+        )
+        self.assertEqual(
+            second_call_kwargs["env"]["HOME"],
             "/tmp/discovered-openclaw-home",
         )
 
@@ -1564,6 +1581,7 @@ class BridgeConfigLoadTests(unittest.TestCase):
 
         set_call = run_mock.call_args_list[2]
         set_cmd = set_call.args[0]
+        self.assertEqual(set_call.kwargs["env"]["HOME"], self.tempdir.name)
         self.assertEqual(
             set_cmd[:4],
             [

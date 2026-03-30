@@ -8,6 +8,7 @@
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -269,6 +270,20 @@ pub fn apply_runner_env_overrides(runtime: &RuntimeState, cmd: &[String]) -> Vec
     }
     wrapped.extend(sanitized);
     wrapped
+}
+
+pub fn apply_runner_env_to_command(
+    command: &mut Command,
+    kind: RunnerKind,
+    managed_home: &Path,
+    ui_bind: &str,
+    approval_wait_timeout_secs: u64,
+) {
+    for (key, value) in
+        runner_env_overrides(kind, managed_home, ui_bind, approval_wait_timeout_secs)
+    {
+        command.env(key, value);
+    }
 }
 
 /// Resolve the effective Zone 0 workspace for a command-targeted runner.
@@ -609,7 +624,26 @@ fn runner_env_overrides(
     let base_url = runner_api_base_url(ui_bind);
     let approval_wait = approval_wait_timeout_secs.clamp(1, 300).to_string();
     match kind {
-        RunnerKind::Openclaw => vec![("OPENCLAW_HOME", home)],
+        RunnerKind::Openclaw => vec![
+            ("OPENCLAW_HOME", home.clone()),
+            ("HOME", home.clone()),
+            (
+                "XDG_CONFIG_HOME",
+                managed_home.join(".config").display().to_string(),
+            ),
+            (
+                "XDG_DATA_HOME",
+                managed_home.join(".local/share").display().to_string(),
+            ),
+            (
+                "XDG_STATE_HOME",
+                managed_home.join(".local/state").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME",
+                managed_home.join(".cache").display().to_string(),
+            ),
+        ],
         RunnerKind::Claudecode => vec![
             ("CLAUDE_CONFIG_DIR", home.clone()),
             ("HOME", home),
@@ -954,6 +988,80 @@ mod tests {
         assert!(
             !joined.contains("HOME=/tmp/host-home"),
             "host override should be stripped"
+        );
+    }
+
+    #[test]
+    fn apply_runner_env_overrides_enforces_openclaw_managed_home_and_xdg() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let managed_home = runtime.config.runtime_root.join("user_data/openclaw_home");
+        let managed_workspace = runtime.config.workspace.clone();
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Openclaw,
+            managed_home: managed_home.clone(),
+            managed_workspace,
+            integrations: Vec::new(),
+            missing: RunnerMissingState::default(),
+        });
+
+        let cmd = vec![
+            "env".to_string(),
+            "OPENCLAW_HOME=/tmp/host-openclaw".to_string(),
+            "HOME=/tmp/host-home".to_string(),
+            "XDG_CONFIG_HOME=/tmp/host-config".to_string(),
+            "XDG_DATA_HOME=/tmp/host-data".to_string(),
+            "XDG_STATE_HOME=/tmp/host-state".to_string(),
+            "XDG_CACHE_HOME=/tmp/host-cache".to_string(),
+            "openclaw".to_string(),
+            "status".to_string(),
+        ];
+        let wrapped = apply_runner_env_overrides(&runtime, &cmd);
+        let joined = wrapped.join(" ");
+        let managed_home_text = managed_home.to_string_lossy().to_string();
+        let expected_xdg = managed_home.join(".config").to_string_lossy().to_string();
+        let expected_data = managed_home
+            .join(".local/share")
+            .to_string_lossy()
+            .to_string();
+        let expected_state = managed_home
+            .join(".local/state")
+            .to_string_lossy()
+            .to_string();
+        let expected_cache = managed_home.join(".cache").to_string_lossy().to_string();
+
+        assert!(joined.contains(&format!("OPENCLAW_HOME={managed_home_text}")));
+        assert!(joined.contains(&format!("HOME={managed_home_text}")));
+        assert!(joined.contains(&format!("XDG_CONFIG_HOME={expected_xdg}")));
+        assert!(joined.contains(&format!("XDG_DATA_HOME={expected_data}")));
+        assert!(joined.contains(&format!("XDG_STATE_HOME={expected_state}")));
+        assert!(joined.contains(&format!("XDG_CACHE_HOME={expected_cache}")));
+        assert!(
+            !joined.contains("OPENCLAW_HOME=/tmp/host-openclaw"),
+            "host OPENCLAW_HOME override should be stripped"
+        );
+        assert!(
+            !joined.contains("HOME=/tmp/host-home"),
+            "host HOME override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_CONFIG_HOME=/tmp/host-config"),
+            "host XDG config override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_DATA_HOME=/tmp/host-data"),
+            "host XDG data override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_STATE_HOME=/tmp/host-state"),
+            "host XDG state override should be stripped"
+        );
+        assert!(
+            !joined.contains("XDG_CACHE_HOME=/tmp/host-cache"),
+            "host XDG cache override should be stripped"
         );
     }
 
