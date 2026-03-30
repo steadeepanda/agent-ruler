@@ -45,6 +45,89 @@
         .filter(Boolean);
       return normalizeListValues(parts);
     };
+    const formatReleaseNoteInline = (text) => esc(text)
+      .replace(/`([^`]+)`/g, '<code class="mono">$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    const renderReleaseNotesHtml = (markdown) => {
+      const source = String(markdown || '').trim();
+      if (!source) {
+        return '<p class="form-hint" style="margin:0;">Release notes were not available for this update.</p>';
+      }
+
+      const parts = [];
+      let listItems = [];
+      const flushList = () => {
+        if (!listItems.length) return;
+        parts.push(`<ul class="modal-release-notes-list">${listItems.join('')}</ul>`);
+        listItems = [];
+      };
+
+      source.split(/\r?\n/).forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          flushList();
+          return;
+        }
+        if (trimmed.startsWith('### ')) {
+          flushList();
+          parts.push(`<h4 class="modal-release-notes-title">${formatReleaseNoteInline(trimmed.slice(4))}</h4>`);
+          return;
+        }
+        if (trimmed.startsWith('## ')) {
+          flushList();
+          parts.push(`<h3 class="modal-release-notes-title">${formatReleaseNoteInline(trimmed.slice(3))}</h3>`);
+          return;
+        }
+        if (trimmed.startsWith('- ')) {
+          listItems.push(`<li>${formatReleaseNoteInline(trimmed.slice(2))}</li>`);
+          return;
+        }
+        flushList();
+        parts.push(`<p class="form-hint" style="margin:0;">${formatReleaseNoteInline(trimmed)}</p>`);
+      });
+
+      flushList();
+      return parts.join('');
+    };
+    const renderUpdateOutcomeModal = (outcome, fallbackTag) => {
+      const targetTag = String(outcome?.target_tag || fallbackTag || '').trim() || 'latest';
+      const nextSteps = Array.isArray(outcome?.next_steps)
+        ? outcome.next_steps
+            .map((step) => `<li>${formatReleaseNoteInline(step)}</li>`)
+            .join('')
+        : '';
+      const content = `
+        <div class="flex flex-col gap-4">
+          <div>
+            <p style="margin:0 0 var(--space-2) 0;">Agent Ruler is now running <strong>${esc(targetTag)}</strong>.</p>
+            <p class="form-hint" style="margin:0;">Here is what changed in this update.</p>
+          </div>
+          <div class="settings-section" style="margin:0;">
+            <div class="settings-section-content" style="padding-top:0;">
+              ${renderReleaseNotesHtml(outcome?.release_notes_markdown)}
+            </div>
+          </div>
+          ${nextSteps ? `
+            <div>
+              <h4 class="modal-release-notes-title">Next steps</h4>
+              <ul class="modal-release-notes-list">${nextSteps}</ul>
+            </div>
+          ` : ''}
+        </div>
+      `;
+      const footerParts = [];
+      if (outcome?.release_url) {
+        footerParts.push(`<a class="btn btn-secondary btn-sm" href="${esc(outcome.release_url)}" target="_blank" rel="noopener">Open Release</a>`);
+      }
+      footerParts.push('<button id="update-outcome-modal-close" class="btn btn-primary btn-sm" type="button">Close</button>');
+      openModal(`Updated to ${targetTag}`, content, {
+        footer: footerParts.join('')
+      });
+      const closeButton = document.getElementById('update-outcome-modal-close');
+      if (closeButton) {
+        closeButton.addEventListener('click', closeModal, { once: true });
+      }
+    };
 
     const runnerAllowFrom = {
       'claudecode-bridge': normalizeListValues(claudecodeBridge.allow_from || []),
@@ -645,6 +728,7 @@
             updateStatusEl.textContent = `Update applied to ${outcome?.target_tag || targetTag}. Refresh page; restart UI if assets look stale.`;
           }
           recordUiEvent('info', 'update-apply', `Update applied to ${outcome?.target_tag || targetTag}`);
+          renderUpdateOutcomeModal(outcome, targetTag);
           await refreshStatus();
           await checkForUpdates(true);
         } catch (err) {

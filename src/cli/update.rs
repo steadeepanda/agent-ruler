@@ -25,6 +25,7 @@ struct UpdateCheckResult {
     latest_version: String,
     release_url: Option<String>,
     published_at: Option<String>,
+    release_notes_markdown: Option<String>,
     update_available: bool,
     requested_tag: Option<String>,
 }
@@ -38,6 +39,7 @@ struct UpdateApplyResult {
     repo: String,
     updated: bool,
     release_url: Option<String>,
+    release_notes_markdown: Option<String>,
     runner_restarted: bool,
     ui_restart_required: bool,
     install_logs: Option<String>,
@@ -54,6 +56,7 @@ struct GitHubReleaseMetadata {
     tag_name: String,
     html_url: Option<String>,
     published_at: Option<String>,
+    body: Option<String>,
     assets: Vec<GitHubReleaseAsset>,
 }
 
@@ -88,6 +91,7 @@ pub fn run_update(
     let current_tag = format!("v{}", current_version);
     let target_tag = normalize_release_tag(&release.tag_name);
     let target_version = target_tag.trim_start_matches('v').to_string();
+    let release_notes_markdown = normalize_release_notes_markdown(release.body.as_deref());
     let update_available = is_newer_tag(&current_tag, &target_tag);
 
     let check = UpdateCheckResult {
@@ -99,6 +103,7 @@ pub fn run_update(
         latest_version: target_version,
         release_url: release.html_url.clone(),
         published_at: release.published_at.clone(),
+        release_notes_markdown: release_notes_markdown.clone(),
         update_available,
         requested_tag: requested_tag.clone(),
     };
@@ -196,6 +201,7 @@ pub fn run_update(
         repo,
         updated: true,
         release_url: release.html_url,
+        release_notes_markdown,
         runner_restarted,
         ui_restart_required: true,
         install_logs: if json { Some(install_logs) } else { None },
@@ -221,6 +227,15 @@ pub fn run_update(
     }
 
     Ok(())
+}
+
+fn normalize_release_notes_markdown(body: Option<&str>) -> Option<String> {
+    let trimmed = body.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn detect_github_repo() -> String {

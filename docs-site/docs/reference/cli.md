@@ -200,7 +200,7 @@ Agent Ruler keeps managed runtime paths and governance wiring in place.
 
 ## Version sync
 
-Version source of truth is `Cargo.toml`.
+Version source of truth is the root [`config/app.json`](/config/app.json) manifest.
 
 After changing it, run:
 

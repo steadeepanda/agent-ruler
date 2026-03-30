@@ -1401,6 +1401,25 @@ html:not(.dark) .moon-icon { display: block; }
   gap: var(--space-3);
 }
 
+.modal-release-notes-title {
+  margin: 0 0 var(--space-2) 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-release-notes-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+}
+
+.modal-release-notes-list li {
+  line-height: 1.6;
+}
+
 /* Toast Notifications */
 .toast-container {
   position: fixed;
@@ -2220,4 +2239,3 @@ html:not(.dark) .moon-icon { display: block; }
     gap: var(--space-4);
   }
 }
-

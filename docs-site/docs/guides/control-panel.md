@@ -8,7 +8,7 @@ If you are still on setup, start with [Getting Started](/guides/getting-started)
 <details>
 <summary><strong>Open WebUI showcase video</strong></summary>
 
-This recording shows the redesigned Control Panel flow for `v0.1.9`.
+This recording shows the redesigned Control Panel flow for `v0.1.9-1`.
 The clip itself still shows `v0.1.8` in the UI because the version label was not updated before export.
 
 <p align="center">

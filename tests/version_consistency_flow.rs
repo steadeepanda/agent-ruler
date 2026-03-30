@@ -38,6 +38,23 @@ fn parse_package_json_version(raw: &str) -> String {
         .expect("version in package.json")
 }
 
+fn parse_app_config_json(raw: &str) -> (String, String, String) {
+    let data: Value = serde_json::from_str(raw).expect("parse config/app.json");
+    let version = data["version"]
+        .as_str()
+        .unwrap_or_else(|| panic!("version field in config/app.json: {data}"))
+        .to_string();
+    let tag = data["tag"]
+        .as_str()
+        .unwrap_or_else(|| panic!("tag field in config/app.json: {data}"))
+        .to_string();
+    let public_repo = data["public_repo"]
+        .as_str()
+        .unwrap_or_else(|| panic!("public_repo field in config/app.json: {data}"))
+        .to_string();
+    (version, tag, public_repo)
+}
+
 fn manifest_section_by_id<'a>(manifest: &'a Value, id: &str) -> &'a Value {
     manifest["sections"]
         .as_array()
@@ -62,33 +79,44 @@ fn manifest_routes(section: &Value) -> Vec<String> {
 #[test]
 fn compiled_cli_version_matches_cargo_manifest_version() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_config = read_file(&root.join("config/app.json"));
+    let (version, tag, _) = parse_app_config_json(&app_config);
     let cargo_toml = read_file(&root.join("Cargo.toml"));
     let cargo_version = parse_manifest_version(&cargo_toml);
+    assert_eq!(tag, format!("v{version}"));
     assert_eq!(env!("CARGO_PKG_VERSION"), cargo_version);
+    assert_eq!(cargo_version, version);
 }
 
 #[test]
-fn docs_package_version_matches_cargo_manifest_version() {
+fn docs_package_version_matches_shared_version_manifest() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let cargo_toml = read_file(&root.join("Cargo.toml"));
-    let cargo_version = parse_manifest_version(&cargo_toml);
+    let app_config = read_file(&root.join("config/app.json"));
+    let (version, tag, _) = parse_app_config_json(&app_config);
 
     let docs_package = read_file(&root.join("docs-site/package.json"));
     let docs_version = parse_package_json_version(&docs_package);
+    let docs_lock = read_file(&root.join("docs-site/package-lock.json"));
+    let lock_version = parse_package_json_version(&docs_lock);
+    let plugin =
+        read_file(&root.join("bridge/openclaw/openclaw-agent-ruler-tools/openclaw.plugin.json"));
+    let plugin_version = parse_package_json_version(&plugin);
 
-    assert_eq!(docs_version, cargo_version);
+    assert_eq!(tag, format!("v{version}"));
+    assert_eq!(docs_version, version);
+    assert_eq!(lock_version, version);
+    assert_eq!(plugin_version, version);
 }
 
 #[test]
-fn docs_config_uses_cargo_version_source_of_truth() {
+fn docs_config_uses_shared_version_manifest() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let docs_config = read_file(&root.join("docs-site/docs/.vitepress/config.ts"));
     let docs_css = read_file(&root.join("docs-site/docs/.vitepress/theme/custom.css"));
 
-    assert!(docs_config.contains("cargoTomlPath"));
-    assert!(docs_config.contains("readFileSync(cargoTomlPath"));
-    assert!(docs_config.contains("versionMatch"));
-    assert!(docs_config.contains("const version = versionMatch ? versionMatch[1] : 'unknown';"));
+    assert!(docs_config.contains("config/app.json"));
+    assert!(docs_config.contains("appConfigPath"));
+    assert!(docs_config.contains("appConfig.tag ?? `v${appConfig.version}`"));
     assert!(
         docs_css.contains(".VPNavBar .VPNavBarTitle .title::after"),
         "docs header version badge should be scoped to the title/logo container"
@@ -96,6 +124,26 @@ fn docs_config_uses_cargo_version_source_of_truth() {
     assert!(
         !docs_css.contains(".VPNavBar .title::after"),
         "generic .VPNavBar .title::after causes duplicate version badges"
+    );
+}
+
+#[test]
+fn installer_and_updater_default_repo_match_shared_app_config() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_config = read_file(&root.join("config/app.json"));
+    let (_, _, public_repo) = parse_app_config_json(&app_config);
+    let installer = read_file(&root.join("install/install.sh"));
+    let updater = read_file(&root.join("src/cli/update.rs"));
+
+    assert!(
+        installer.contains(&format!("printf '%s' \"{public_repo}\"")),
+        "install script default repo should match config/app.json"
+    );
+    assert!(
+        updater.contains(&format!(
+            "const DEFAULT_GITHUB_REPO: &str = \"{public_repo}\";"
+        )),
+        "CLI updater default repo should match config/app.json"
     );
 }
 

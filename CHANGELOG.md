@@ -16,6 +16,11 @@ All notable user-facing changes are documented here.
 - Added Bubblewrap `uid map` / AppArmor remediation guidance for Linux hosts that block user namespaces.
 - Restored high-value historical troubleshooting entries for real runtime failures such as Anthropic auth import issues, gateway port conflicts, OpenCode model lookup failures, and Claude Code MCP duplication errors.
 
+### Versioning and update UX
+- Added a shared `config/app.json` manifest for release-level constants and used it to drive version/repo sync into Cargo, docs, install metadata, and OpenClaw plugin metadata.
+- Kept the version sync helper as a minimal tracked-file updater so release metadata stays consistent without touching showcase asset filenames or ignored files.
+- Added post-update release notes to the Control Settings update flow so successful WebUI updates now open a popup showing what changed plus any follow-up steps.
+
 ## [v0.1.9] - 2026-03-25
 
 ### Control Panel WebUI redesign

@@ -6,11 +6,14 @@ import { defineConfig } from 'vitepress';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Read version from Cargo.toml
-const cargoTomlPath = resolve(__dirname, '../../../Cargo.toml');
-const cargoToml = readFileSync(cargoTomlPath, 'utf8');
-const versionMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
-const version = versionMatch ? versionMatch[1] : 'unknown';
+// Read shared app constants from the repo config.
+const appConfigPath = resolve(__dirname, '../../../config/app.json');
+const appConfig = JSON.parse(readFileSync(appConfigPath, 'utf8')) as {
+  version: string;
+  tag?: string;
+  public_repo?: string;
+};
+const version = appConfig.tag ?? `v${appConfig.version}`;
 
 type ManifestItem = {
   title: string;
@@ -87,7 +90,7 @@ export default defineConfig({
     [
       'style',
       {},
-      `:root{--ar-docs-version-label:"v${version}";}`
+      `:root{--ar-docs-version-label:"${version}";}`
     ]
   ],
   themeConfig: {

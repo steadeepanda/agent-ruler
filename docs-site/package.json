@@ -1,7 +1,7 @@
 {
   "name": "agent-ruler-docs",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.1.9-1",
   "description": "VitePress docs for Agent Ruler Control Panel help",
   "type": "module",
   "scripts": {
