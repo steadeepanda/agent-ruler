@@ -117,6 +117,20 @@ pub async fn run_tool_preflight_for_runner(
         {
             "agent-ruler CLI commands are operator-only; use Agent Ruler API tools instead"
                 .to_string()
+        } else if action
+            .metadata
+            .get("operator_only_command")
+            .map(|value| value == "managed_runner_cli")
+            .unwrap_or(false)
+        {
+            let wrapper = action
+                .metadata
+                .get("managed_runner_wrapper")
+                .cloned()
+                .unwrap_or_else(|| "agent-ruler run -- <runner> ...".to_string());
+            format!(
+                "runner CLI commands must stay on the managed Agent Ruler path; ask the operator to run `{wrapper}` instead"
+            )
         } else {
             "operator/runtime internals are hidden from agent context".to_string()
         };
@@ -500,6 +514,21 @@ fn build_openclaw_tool_action(
                     "agent-ruler".to_string(),
                 );
             }
+            if let Some(invocation) =
+                extract_managed_runner_cli_invocation(&command_text, &resolved)
+            {
+                action
+                    .metadata
+                    .insert("force_internal_deny".to_string(), "true".to_string());
+                action.metadata.insert(
+                    "operator_only_command".to_string(),
+                    "managed_runner_cli".to_string(),
+                );
+                action.metadata.insert(
+                    "managed_runner_wrapper".to_string(),
+                    invocation.wrapper_command,
+                );
+            }
 
             // Check for destructive file commands that should be subject to filesystem
             // zone policies even when executed via shell. This prevents bypassing
@@ -831,6 +860,60 @@ fn contains_agent_ruler_cli_invocation(command_text: &str, resolved_exec: &Path)
                 .map(|value| value.eq_ignore_ascii_case("agent-ruler"))
                 .unwrap_or(false)
         })
+}
+
+struct ManagedRunnerCliInvocation {
+    wrapper_command: String,
+}
+
+fn extract_managed_runner_cli_invocation(
+    command_text: &str,
+    _resolved_exec: &Path,
+) -> Option<ManagedRunnerCliInvocation> {
+    let parts: Vec<&str> = command_text.split_whitespace().collect();
+    for index in 0..parts.len() {
+        let token = clean_command_token(parts[index]);
+        if token.is_empty() || is_shell_separator(&token) {
+            continue;
+        }
+        let name = Path::new(&token)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "openclaw" | "claude" | "opencode"
+        ) {
+            continue;
+        }
+
+        let mut runner_tokens = vec![name.to_string()];
+        for raw in parts.iter().skip(index + 1) {
+            let candidate = clean_command_token(raw);
+            if candidate.is_empty() {
+                continue;
+            }
+            if is_shell_separator(&candidate) {
+                break;
+            }
+            runner_tokens.push(candidate);
+        }
+        if let Some(wrapper_command) = managed_runner_wrapper_command_for_tokens(&runner_tokens) {
+            return Some(ManagedRunnerCliInvocation { wrapper_command });
+        }
+    }
+    None
+}
+
+fn managed_runner_wrapper_command_for_tokens(tokens: &[String]) -> Option<String> {
+    let first = tokens.first()?.trim();
+    if !matches!(
+        first.to_ascii_lowercase().as_str(),
+        "openclaw" | "claude" | "opencode"
+    ) {
+        return None;
+    }
+    Some(format!("agent-ruler run -- {}", tokens.join(" ")))
 }
 
 /// Detect destructive file commands (rm, rmdir, shred, etc.) and extract their target paths.

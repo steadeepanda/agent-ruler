@@ -1,6 +1,6 @@
 ---
 name: agent-ruler-approvals
-version: 0.1.9-2
+version: 0.1.10
 description: "Forward inbound channel interactions to the local Agent Ruler approvals bridge"
 homepage: "https://github.com/steadeepanda/agent-ruler"
 metadata:

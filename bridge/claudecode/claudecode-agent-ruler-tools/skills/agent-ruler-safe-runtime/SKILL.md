@@ -12,12 +12,13 @@ Use this guidance whenever Claude Code runs under Agent Ruler.
 
 1. Use Agent Ruler API tools (`agent_ruler_*`) for cross-zone transfer and approval workflows.
 2. Do not run `agent-ruler` CLI commands from agent tool calls.
-3. `pending_approval` is blocking; wait for resolution and avoid duplicate/retry request loops.
-4. `agent_ruler_wait_for_approval` must use full approval IDs only.
-5. Never approve or deny Agent Ruler approvals from agent context.
-6. Never bypass transfer boundaries with direct shell copy/move between zones.
-7. Never directly write to user destinations from runner tool calls.
-8. Do not claim completion until the corresponding Agent Ruler endpoint reports final success.
+3. Do not invoke runner CLIs (`openclaw`, `claude`, `opencode`) from agent shell/exec tools; runner lifecycle/config actions must stay on the operator-managed `agent-ruler run -- ...` path.
+4. `pending_approval` is blocking; wait for resolution and avoid duplicate/retry request loops.
+5. `agent_ruler_wait_for_approval` must use full approval IDs only.
+6. Never approve or deny Agent Ruler approvals from agent context.
+7. Never bypass transfer boundaries with direct shell copy/move between zones.
+8. Never directly write to user destinations from runner tool calls.
+9. Do not claim completion until the corresponding Agent Ruler endpoint reports final success.
 
 ## Zone Mental Model
 

@@ -1,6 +1,6 @@
 [package]
 name = "agent-ruler"
-version = "0.1.9-2"
+version = "0.1.10"
 edition = "2021"
 license = "MIT"
 description = "Deterministic reference monitor + confinement runner for AI agents"

@@ -74,6 +74,7 @@
         approvals: 'Approvals',
         'approval-detail': 'Approval Details',
         files: 'Files',
+        'help-feedback': 'Help / Feedback',
         policy: 'Policy',
         receipts: 'Receipts',
         runners: 'Runners',

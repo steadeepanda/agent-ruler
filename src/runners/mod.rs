@@ -258,17 +258,36 @@ pub fn apply_runner_env_overrides(runtime: &RuntimeState, cmd: &[String]) -> Vec
         return cmd.to_vec();
     }
 
-    let mut sanitized = cmd.to_vec();
-    for (key, _) in &overrides {
-        sanitized = strip_env_assignment(&sanitized, key);
+    let override_keys: std::collections::BTreeSet<&str> =
+        overrides.iter().map(|(key, _)| *key).collect();
+
+    if let Some((existing_assignments, command_tail)) = split_env_prefix_command(cmd) {
+        if command_tail.is_empty() {
+            return cmd.to_vec();
+        }
+        let filtered_existing = existing_assignments.into_iter().filter(|token| {
+            assignment_key(token)
+                .map(|key| !override_keys.contains(key))
+                .unwrap_or(true)
+        });
+
+        let mut wrapped =
+            Vec::with_capacity(command_tail.len() + overrides.len() + override_keys.len() + 1);
+        wrapped.push("env".to_string());
+        for (key, value) in overrides {
+            wrapped.push(format!("{key}={value}"));
+        }
+        wrapped.extend(filtered_existing);
+        wrapped.extend(command_tail);
+        return wrapped;
     }
 
-    let mut wrapped = Vec::with_capacity(sanitized.len() + overrides.len() + 1);
+    let mut wrapped = Vec::with_capacity(cmd.len() + overrides.len() + 1);
     wrapped.push("env".to_string());
     for (key, value) in overrides {
         wrapped.push(format!("{key}={value}"));
     }
-    wrapped.extend(sanitized);
+    wrapped.extend(cmd.iter().cloned());
     wrapped
 }
 
@@ -555,37 +574,37 @@ fn command_token(cmd: &[String]) -> Option<&str> {
     None
 }
 
-fn strip_env_assignment(cmd: &[String], key: &str) -> Vec<String> {
-    let Some(first) = cmd.first() else {
-        return Vec::new();
-    };
+fn split_env_prefix_command(cmd: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+    let first = cmd.first()?;
     let first_name = Path::new(first)
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or(first.as_str());
     if first_name != "env" {
-        return cmd.to_vec();
+        return None;
     }
 
-    let key_prefix = format!("{key}=");
-    let mut output = Vec::with_capacity(cmd.len());
-    output.push(first.clone());
+    let mut assignments = Vec::new();
     let mut index = 1usize;
     while index < cmd.len() {
         let token = &cmd[index];
-        if token.contains('=') {
-            if !token.starts_with(&key_prefix) {
-                output.push(token.clone());
-            }
+        if assignment_key(token).is_some() {
+            assignments.push(token.clone());
             index += 1;
             continue;
         }
-
-        output.extend(cmd[index..].iter().cloned());
-        return output;
+        return Some((assignments, cmd[index..].to_vec()));
     }
 
-    output
+    Some((assignments, Vec::new()))
+}
+
+fn assignment_key(token: &str) -> Option<&str> {
+    let (key, _) = token.split_once('=')?;
+    if key.is_empty() {
+        return None;
+    }
+    Some(key)
 }
 
 fn print_keep_data_message(kind: RunnerKind, command_name: &str, emit_to_stderr: bool) {
@@ -1062,6 +1081,72 @@ mod tests {
         assert!(
             !joined.contains("XDG_CACHE_HOME=/tmp/host-cache"),
             "host XDG cache override should be stripped"
+        );
+    }
+
+    #[test]
+    fn apply_runner_env_overrides_flattens_env_prefix_and_preserves_tail() {
+        let project = tempdir().expect("project tempdir");
+        let runtime_root = tempdir().expect("runtime tempdir");
+        init_layout(project.path(), Some(runtime_root.path()), None, true).expect("init runtime");
+        let mut runtime =
+            load_runtime(project.path(), Some(runtime_root.path())).expect("load runtime");
+        let managed_home = runtime.config.runtime_root.join("user_data/openclaw_home");
+        runtime.config.runner = Some(RunnerAssociation {
+            kind: RunnerKind::Openclaw,
+            managed_home,
+            managed_workspace: runtime.config.workspace.clone(),
+            integrations: Vec::new(),
+            missing: RunnerMissingState::default(),
+        });
+
+        let cmd = vec![
+            "env".to_string(),
+            "OPENCLAW_HOME=/tmp/host-openclaw".to_string(),
+            "CUSTOM_FLAG=1".to_string(),
+            "openclaw".to_string(),
+            "sessions".to_string(),
+            "cleanup".to_string(),
+            "alpha".to_string(),
+            "--".to_string(),
+            "--all".to_string(),
+        ];
+
+        let wrapped = apply_runner_env_overrides(&runtime, &cmd);
+        let env_count = wrapped
+            .iter()
+            .filter(|token| token.as_str() == "env")
+            .count();
+        assert_eq!(
+            env_count, 1,
+            "runner env wrapping should keep a single env prefix"
+        );
+        assert!(
+            !wrapped
+                .iter()
+                .any(|token| token == "OPENCLAW_HOME=/tmp/host-openclaw"),
+            "host OPENCLAW_HOME assignment should be replaced by managed override"
+        );
+        assert!(
+            wrapped.iter().any(|token| token == "CUSTOM_FLAG=1"),
+            "caller env assignments should remain after managed overrides"
+        );
+
+        let exec_index = wrapped
+            .iter()
+            .position(|token| token == "openclaw")
+            .expect("openclaw executable should be present");
+        assert_eq!(
+            &wrapped[exec_index..],
+            &[
+                "openclaw".to_string(),
+                "sessions".to_string(),
+                "cleanup".to_string(),
+                "alpha".to_string(),
+                "--".to_string(),
+                "--all".to_string(),
+            ],
+            "downstream command tail should be preserved exactly"
         );
     }
 

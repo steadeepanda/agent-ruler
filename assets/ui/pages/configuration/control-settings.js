@@ -102,10 +102,8 @@
             <p style="margin:0 0 var(--space-2) 0;">Agent Ruler is now running <strong>${esc(targetTag)}</strong>.</p>
             <p class="form-hint" style="margin:0;">Here is what changed in this update.</p>
           </div>
-          <div class="settings-section" style="margin:0;">
-            <div class="settings-section-content" style="padding-top:0;">
-              ${renderReleaseNotesHtml(outcome?.release_notes_markdown)}
-            </div>
+          <div class="modal-release-notes-content">
+            ${renderReleaseNotesHtml(outcome?.release_notes_markdown)}
           </div>
           ${nextSteps ? `
             <div>

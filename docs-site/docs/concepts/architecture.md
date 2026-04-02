@@ -1,13 +1,13 @@
 ---
 title: Architecture
 ---
-# Agent Ruler v0.1.9-2 Architecture (Linux-first)
+# Agent Ruler v0.1.10 Architecture (Linux-first)
 
 ## 1. Scope and Security Objectives
 
 Agent Ruler is a **deterministic reference monitor** plus **confinement runner** for AI agents. It contains no LLM logic in policy decisions—enforcement is purely rule-based and deterministic.
 
-### Primary v0.1.9-2 Objectives
+### Primary v0.1.10 Objectives
 
 - **Deterministic decisioning** with stable reason codes
 - **Detached enforcement** when processes are launched through Agent Ruler
@@ -44,7 +44,7 @@ Agent Ruler is a **deterministic reference monitor** plus **confinement runner**
 | Tool misuse | Using available tools for destructive purposes | Operation-level guards, mass action limits |
 | Multi-step attacks | Chained fetch→write→exec→persist or fetch→read→exfil | Independent step validation |
 
-### Out-of-Scope in v0.1.9-2
+### Out-of-Scope in v0.1.10
 
 | Limitation | Reason | Mitigation |
 |------------|--------|------------|
@@ -52,7 +52,7 @@ Agent Ruler is a **deterministic reference monitor** plus **confinement runner**
 | Privileged local attacker with root | Root can bypass namespace isolation | Defense-in-depth, audit logging |
 | Syscall-complete mediation without kernel hooks | Operating at process/command level | Multiple independent controls |
 | Memory-based exfiltration (shared memory, pipes) | Outside current interception layer | Network/filesystem focused |
-| Timing/side-channel attacks | Different threat category | Not addressed in v0.1.9-2 |
+| Timing/side-channel attacks | Different threat category | Not addressed in v0.1.10 |
 
 ---
 
@@ -340,7 +340,7 @@ If bubblewrap fails (e.g., uid-map/RTM_NEWADDR errors):
 ┌─────────────────────────────────────────────────────────────┐
 │              Reserved (Future)                              │
 │  • Download byte-size denial reason exists in model         │
-│  • Byte-size enforcement not wired in v0.1.9-2                │
+│  • Byte-size enforcement not wired in v0.1.10                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -471,7 +471,7 @@ When quarantine is triggered:
 - Never spam elevation prompts
 - Bulk approval available with confirmation
 - Arbitrary `sudo` passthrough is denied.
-- Supported v0.1.9-2 mediated verb: `install_packages` (`sudo apt install ...` / `sudo apt-get install ...`).
+- Supported v0.1.10 mediated verb: `install_packages` (`sudo apt install ...` / `sudo apt-get install ...`).
 - Elevation requests are converted to deterministic approval records (`approval_required_elevation`).
 - On approval, a narrow elevated helper executes fixed args only (no shell), with:
   - allowlisted package checks,
@@ -589,7 +589,7 @@ When quarantine is triggered:
 
 ---
 
-## 14. Known v0.1.9-2 Limitations
+## 14. Known v0.1.10 Limitations
 
 | Limitation | Impact | Mitigation |
 |------------|--------|------------|

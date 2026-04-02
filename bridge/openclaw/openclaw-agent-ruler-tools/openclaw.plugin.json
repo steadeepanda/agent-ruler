@@ -1,7 +1,7 @@
 {
   "id": "openclaw-agent-ruler-tools",
   "name": "Agent Ruler OpenClaw Bridge",
-  "version": "0.1.9-2",
+  "version": "0.1.10",
   "description": "OpenClaw tools for Agent Ruler status feed, approval wait, and transfer requests",
   "entry": "index.ts",
   "permissions": {

@@ -24,6 +24,9 @@ Use `agent-ruler run -- ...` for runner execution so confinement/policy and
 approval semantics are enforced.
 Control Panel is auto-started/maintained by runner launch; use the URL shown
 in terminal output.
+Do not invoke bare runner CLIs (`openclaw`, `claude`, `opencode`) from agent
+shell/exec tools; Agent Ruler now blocks that path and points operators back to
+`agent-ruler run -- ...` so managed restarts and governance cannot escape.
 
 ### 2) Safe runtime + zones
 

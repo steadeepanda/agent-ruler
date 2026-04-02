@@ -62,6 +62,9 @@ use crate::runners::{command_runner_kind, workspace_root_for_command, RunnerKind
 mod confinement;
 mod preflight;
 
+#[cfg(target_os = "linux")]
+pub use confinement::probe_linux_runtime_availability;
+
 use preflight::{
     finalize_with_approval, preflight_elevation_actions, preflight_interpreter_exec_actions,
     preflight_network_egress_actions, preflight_persistence_actions, preflight_utility_actions,

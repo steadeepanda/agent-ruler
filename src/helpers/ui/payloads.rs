@@ -186,6 +186,11 @@ pub struct RunCommandPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DoctorPayload {
+    pub repair: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateApplyPayload {
     pub version: Option<String>,
 }

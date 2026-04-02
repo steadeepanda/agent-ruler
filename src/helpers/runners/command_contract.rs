@@ -362,6 +362,21 @@ mod tests {
     }
 
     #[test]
+    fn normalize_openclaw_passthrough_keeps_full_tail() {
+        let cmd = vec![
+            "openclaw".to_string(),
+            "sessions".to_string(),
+            "cleanup".to_string(),
+            "alpha".to_string(),
+            "--dry-run".to_string(),
+            "--".to_string(),
+            "--all".to_string(),
+        ];
+        let normalized = normalize_runner_command(&cmd);
+        assert_eq!(normalized, cmd);
+    }
+
+    #[test]
     fn detect_structured_output_kind_matches_runner_flags() {
         let claude = vec![
             "claude".to_string(),

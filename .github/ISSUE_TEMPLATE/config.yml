@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feedback / Ideas (GitHub Discussions)
+    url: https://github.com/steadeepanda/agent-ruler/discussions
+    about: Share product ideas and feature feedback in Discussions.
+  - name: Questions / Help (GitHub Discussions)
+    url: https://github.com/steadeepanda/agent-ruler/discussions
+    about: Ask usage and troubleshooting questions in Discussions.

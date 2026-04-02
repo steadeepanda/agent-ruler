@@ -42,6 +42,7 @@
 pub mod approvals;
 pub mod claudecode_bridge;
 pub mod config;
+pub mod doctor;
 pub mod embedded_bridge;
 pub mod export_gate;
 pub mod helpers;

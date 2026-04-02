@@ -126,25 +126,6 @@ pub(crate) fn normalize_telegram_streaming_flag(config: &mut Map<String, Value>)
     changed
 }
 
-/// Disable the session-memory hook for non-Anthropic provider defaults.
-///
-/// This preserves startup behavior for providers where the hook is not
-/// compatible or creates noisy failures during gateway boot.
-pub(crate) fn disable_session_memory_hook_for_non_anthropic(config: &mut Map<String, Value>) {
-    let Some(provider) = selected_model_provider(config) else {
-        return;
-    };
-    if provider.eq_ignore_ascii_case("anthropic") {
-        return;
-    }
-
-    let hooks = ensure_object(config, "hooks");
-    let internal = ensure_object(hooks, "internal");
-    let entries = ensure_object(internal, "entries");
-    let session_memory = ensure_object(entries, "session-memory");
-    session_memory.insert("enabled".to_string(), Value::Bool(false));
-}
-
 /// Apply the OpenClaw tools adapter configuration into managed `openclaw.json`.
 ///
 /// Invariants:
@@ -187,6 +168,7 @@ pub(crate) fn apply_tools_adapter_config(
     let plugins = ensure_object(config, "plugins");
     let load = ensure_object(plugins, "load");
     let load_paths = ensure_array(load, "paths");
+    prune_stale_tools_adapter_paths(load_paths, &plugin_path);
     ensure_string_in_array(load_paths, &plugin_path);
 
     let entries = ensure_object(plugins, "entries");
@@ -217,6 +199,24 @@ pub(crate) fn apply_tools_adapter_config(
     ensure_string_in_array(allow, plugin_id);
 }
 
+fn prune_stale_tools_adapter_paths(load_paths: &mut Vec<Value>, canonical_plugin_path: &str) {
+    load_paths.retain(|entry| {
+        let Some(path) = entry.as_str() else {
+            return true;
+        };
+        if path == canonical_plugin_path {
+            return true;
+        }
+        !looks_like_agent_ruler_openclaw_plugin_path(path)
+    });
+}
+
+fn looks_like_agent_ruler_openclaw_plugin_path(path: &str) -> bool {
+    path.ends_with("/bridge/openclaw/openclaw-agent-ruler-tools")
+        || path.ends_with("/bridge/openclaw/tools-adapter")
+        || path.ends_with("/bridge/openclaw-agent-ruler-tools")
+}
+
 /// Resolve the in-runner Agent Ruler API base URL for OpenClaw tools adapter.
 ///
 /// This intentionally always targets loopback for lowest-latency preflight and
@@ -231,22 +231,54 @@ pub(crate) fn runner_api_base_url(ui_bind: &str) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-fn selected_model_provider(config: &Map<String, Value>) -> Option<String> {
-    let raw_model = config
+pub(crate) fn selected_model_provider(config: &Map<String, Value>) -> Option<String> {
+    let model_value = config
         .get("agents")
         .and_then(Value::as_object)
         .and_then(|agents| agents.get("defaults"))
         .and_then(Value::as_object)
-        .and_then(|defaults| defaults.get("model"))
-        .and_then(|model| match model {
-            Value::String(value) => Some(value.as_str()),
-            Value::Object(map) => map.get("primary").and_then(Value::as_str),
-            _ => None,
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .and_then(|defaults| defaults.get("model"))?;
 
-    let (provider, _) = raw_model.split_once('/')?;
+    match model_value {
+        Value::String(raw) => provider_from_model_ref(raw),
+        Value::Object(map) => {
+            let explicit = map
+                .get("provider")
+                .or_else(|| map.get("modelProvider"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            if explicit.is_some() {
+                return explicit;
+            }
+
+            if let Some(primary) = map.get("primary") {
+                match primary {
+                    Value::String(raw) => provider_from_model_ref(raw),
+                    Value::Object(obj) => obj
+                        .get("provider")
+                        .or_else(|| obj.get("modelProvider"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn provider_from_model_ref(raw_model: &str) -> Option<String> {
+    let model = raw_model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let (provider, _) = model.split_once('/')?;
     let provider = provider.trim();
     if provider.is_empty() {
         None
@@ -255,7 +287,10 @@ fn selected_model_provider(config: &Map<String, Value>) -> Option<String> {
     }
 }
 
-fn ensure_object<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+pub(crate) fn ensure_object<'a>(
+    map: &'a mut Map<String, Value>,
+    key: &str,
+) -> &'a mut Map<String, Value> {
     let value = map
         .entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
@@ -323,8 +358,10 @@ fn coerce_string_bool(raw: &str) -> Option<bool> {
 mod tests {
     use serde_json::json;
 
-    use super::normalize_telegram_streaming_flag;
-    use super::runner_api_base_url;
+    use super::{
+        looks_like_agent_ruler_openclaw_plugin_path, normalize_telegram_streaming_flag,
+        prune_stale_tools_adapter_paths, runner_api_base_url,
+    };
 
     #[test]
     fn runner_api_base_url_uses_loopback_for_tailscale_ip_bind() {
@@ -396,5 +433,39 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(false)
         );
+    }
+
+    #[test]
+    fn prune_stale_tools_adapter_paths_removes_only_old_agent_ruler_variants() {
+        let canonical = "/repo/bridge/openclaw/openclaw-agent-ruler-tools";
+        let mut load_paths = vec![
+            json!("/old/install/bridge/openclaw/openclaw-agent-ruler-tools"),
+            json!("/runtime/workspace/bridge/openclaw/openclaw-agent-ruler-tools"),
+            json!("/custom/plugins/other-plugin"),
+            json!(canonical),
+        ];
+
+        prune_stale_tools_adapter_paths(&mut load_paths, canonical);
+
+        assert_eq!(load_paths.len(), 2);
+        assert!(load_paths
+            .iter()
+            .any(|entry| entry.as_str() == Some(canonical)));
+        assert!(load_paths
+            .iter()
+            .any(|entry| entry.as_str() == Some("/custom/plugins/other-plugin")));
+    }
+
+    #[test]
+    fn detects_agent_ruler_openclaw_plugin_path_variants() {
+        assert!(looks_like_agent_ruler_openclaw_plugin_path(
+            "/tmp/workspace/bridge/openclaw/openclaw-agent-ruler-tools"
+        ));
+        assert!(looks_like_agent_ruler_openclaw_plugin_path(
+            "/tmp/workspace/bridge/openclaw/tools-adapter"
+        ));
+        assert!(!looks_like_agent_ruler_openclaw_plugin_path(
+            "/tmp/workspace/plugins/other-plugin"
+        ));
     }
 }

@@ -17,8 +17,8 @@ use serde_json::{Map, Value};
 
 use crate::config::{AppConfig, RuntimeState};
 use crate::helpers::runners::openclaw::setup_config::{
-    apply_tools_adapter_config, disable_session_memory_hook_for_non_anthropic,
-    merge_imported_sections, normalize_telegram_streaming_flag, runner_api_base_url,
+    apply_tools_adapter_config, ensure_object, merge_imported_sections,
+    normalize_telegram_streaming_flag, runner_api_base_url, selected_model_provider,
     set_gateway_mode_local, set_workspace,
 };
 use crate::runners::{
@@ -62,6 +62,59 @@ const OPENCLAW_INTEGRATIONS: [IntegrationOption; 1] = [IntegrationOption {
     label: "OpenClaw tools adapter",
     detail: "Writes a runtime-local helper under <runtime>/user_data/integrations/openclaw/.",
 }];
+
+#[derive(Debug, Clone)]
+pub struct ManagedProviderAuthCompatibility {
+    pub config_path: PathBuf,
+    pub auth_profiles_path: PathBuf,
+    pub auth_store_path: PathBuf,
+    pub selected_provider: Option<String>,
+    pub selected_provider_api_key: Option<String>,
+    pub session_memory_enabled: bool,
+    pub legacy_profile_format: bool,
+    pub profile_providers: Vec<String>,
+    pub selected_provider_profile_present: bool,
+}
+
+impl ManagedProviderAuthCompatibility {
+    fn missing_config(managed_home: &Path) -> Self {
+        Self {
+            config_path: preferred_openclaw_config_path(managed_home),
+            auth_profiles_path: managed_home
+                .join(OPENCLAW_STATE_DIR_NAME)
+                .join(OPENCLAW_AGENT_AUTH_PROFILES_RELATIVE),
+            auth_store_path: managed_home
+                .join(OPENCLAW_STATE_DIR_NAME)
+                .join(OPENCLAW_AGENT_AUTH_STORE_RELATIVE),
+            selected_provider: None,
+            selected_provider_api_key: None,
+            session_memory_enabled: false,
+            legacy_profile_format: false,
+            profile_providers: Vec::new(),
+            selected_provider_profile_present: false,
+        }
+    }
+
+    pub fn selected_profile_id(&self) -> String {
+        self.selected_provider
+            .as_deref()
+            .map(|provider| format!("{provider}:default"))
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    pub fn repairable(&self) -> bool {
+        self.selected_provider.is_some()
+            && self
+                .selected_provider_api_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && (!self.selected_provider_profile_present || self.legacy_profile_format)
+    }
+
+    fn auth_profiles_document(&self) -> Map<String, Value> {
+        read_json_map_or_default(&self.auth_profiles_path).unwrap_or_default()
+    }
+}
 
 fn tools_adapter_dir(ruler_root: &Path) -> PathBuf {
     let preferred = ruler_root
@@ -470,7 +523,6 @@ impl RunnerAdapter for OpenClawAdapter {
         normalize_telegram_streaming_flag(&mut openclaw_config);
         set_workspace(&mut openclaw_config, &paths.managed_workspace);
         set_gateway_mode_local(&mut openclaw_config);
-        disable_session_memory_hook_for_non_anthropic(&mut openclaw_config);
         // The OpenClaw tools adapter is mandatory for deterministic preflight
         // mediation of native file/exec tools into Agent Ruler receipts.
         apply_tools_adapter_config(runtime, &mut openclaw_config, OPENCLAW_TOOLS_PLUGIN_ID);
@@ -481,6 +533,8 @@ impl RunnerAdapter for OpenClawAdapter {
                 .context("serialize OpenClaw config")?,
         )
         .with_context(|| format!("write {}", config_path.display()))?;
+
+        enforce_managed_provider_auth_compatibility(&paths.managed_home)?;
 
         verify_import_requirements(paths, import_report)?;
 
@@ -758,6 +812,55 @@ fn read_config_map_or_default(path: &Path) -> Result<Map<String, Value>> {
     Ok(parsed.as_object().cloned().unwrap_or_default())
 }
 
+fn read_json_map_or_default(path: &Path) -> Result<Map<String, Value>> {
+    if !path.exists() {
+        return Ok(Map::new());
+    }
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let parsed: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    Ok(parsed.as_object().cloned().unwrap_or_default())
+}
+
+fn write_json_map_pretty(path: &Path, map: &Map<String, Value>, context_label: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&Value::Object(map.clone()))
+            .with_context(|| context_label.to_string())?,
+    )
+    .with_context(|| format!("write {}", path.display()))
+}
+
+fn provider_api_key(
+    auth_store: &Map<String, Value>,
+    models: &Map<String, Value>,
+    provider: &str,
+) -> Option<String> {
+    auth_store
+        .get(provider)
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            models
+                .get("providers")
+                .and_then(Value::as_object)
+                .and_then(|providers| providers.get(provider))
+                .and_then(Value::as_object)
+                .and_then(|entry| entry.get("apiKey"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
 fn extract_importable_config(parsed: &Value) -> Map<String, Value> {
     let mut extracted = Map::new();
     let Some(root) = parsed.as_object() else {
@@ -773,26 +876,221 @@ fn extract_importable_config(parsed: &Value) -> Map<String, Value> {
     extracted
 }
 
-/// Re-apply session-memory provider guard on managed config.
-///
-/// Returns `true` when config changed and was persisted.
-pub fn enforce_session_memory_hook_guard(managed_home: &Path) -> Result<bool> {
-    let Some(config_path) = find_openclaw_config_path(managed_home) else {
-        return Ok(false);
-    };
-    let mut config = read_config_map_or_default(&config_path)?;
-    let before = config.clone();
-    disable_session_memory_hook_for_non_anthropic(&mut config);
-    if config == before {
+/// Repair managed OpenClaw auth/profile state so the selected provider remains usable
+/// for hook-driven background lanes such as session-memory.
+pub fn enforce_managed_provider_auth_compatibility(managed_home: &Path) -> Result<bool> {
+    let compatibility = inspect_managed_provider_auth_compatibility(managed_home)?;
+    if !compatibility.repairable() {
         return Ok(false);
     }
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&Value::Object(config))
-            .context("serialize OpenClaw config guard update")?,
-    )
-    .with_context(|| format!("write {}", config_path.display()))?;
-    Ok(true)
+
+    let Some(selected_provider) = compatibility.selected_provider.as_deref() else {
+        return Ok(false);
+    };
+    let Some(api_key) = compatibility
+        .selected_provider_api_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(false);
+    };
+
+    let config_path = compatibility.config_path.clone();
+    let auth_profiles_path = compatibility.auth_profiles_path.clone();
+    let auth_store_path = compatibility.auth_store_path.clone();
+    let mut config_changed = false;
+    let mut auth_store_changed = false;
+    let mut auth_profiles_changed = false;
+
+    let mut config = read_config_map_or_default(&config_path)?;
+    let auth = ensure_object(&mut config, "auth");
+    let profiles = ensure_object(auth, "profiles");
+    let profile_id = compatibility.selected_profile_id();
+    if !profiles.contains_key(&profile_id) {
+        let mut profile = Map::new();
+        profile.insert(
+            "provider".to_string(),
+            Value::String(selected_provider.to_string()),
+        );
+        profile.insert("mode".to_string(), Value::String("api_key".to_string()));
+        profiles.insert(profile_id.clone(), Value::Object(profile));
+        config_changed = true;
+    }
+    if config_changed {
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&Value::Object(config))
+                .context("serialize OpenClaw config auth profile repair")?,
+        )
+        .with_context(|| format!("write {}", config_path.display()))?;
+    }
+
+    let mut auth_store = read_json_map_or_default(&auth_store_path)?;
+    let auth_store_entry = auth_store
+        .entry(selected_provider.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !auth_store_entry.is_object() {
+        *auth_store_entry = Value::Object(Map::new());
+    }
+    let auth_store_obj = auth_store_entry
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("managed auth store entry is not an object"))?;
+    if auth_store_obj.get("type").and_then(Value::as_str) != Some("api_key") {
+        auth_store_obj.insert("type".to_string(), Value::String("api_key".to_string()));
+        auth_store_changed = true;
+    }
+    if auth_store_obj.get("key").and_then(Value::as_str) != Some(api_key) {
+        auth_store_obj.insert("key".to_string(), Value::String(api_key.to_string()));
+        auth_store_changed = true;
+    }
+    if auth_store_changed {
+        write_json_map_pretty(
+            &auth_store_path,
+            &auth_store,
+            "serialize managed auth store repair",
+        )?;
+    }
+
+    let mut auth_profiles = compatibility.auth_profiles_document();
+    let profiles = ensure_object(&mut auth_profiles, "profiles");
+    let profile_entry = profiles
+        .entry(profile_id.clone())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !profile_entry.is_object() {
+        *profile_entry = Value::Object(Map::new());
+    }
+    let profile_obj = profile_entry
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("managed auth profile entry is not an object"))?;
+    if profile_obj.get("type").and_then(Value::as_str) != Some("api_key") {
+        profile_obj.insert("type".to_string(), Value::String("api_key".to_string()));
+        auth_profiles_changed = true;
+    }
+    if profile_obj.get("provider").and_then(Value::as_str) != Some(selected_provider) {
+        profile_obj.insert(
+            "provider".to_string(),
+            Value::String(selected_provider.to_string()),
+        );
+        auth_profiles_changed = true;
+    }
+    if profile_obj.get("key").and_then(Value::as_str) != Some(api_key) {
+        profile_obj.insert("key".to_string(), Value::String(api_key.to_string()));
+        auth_profiles_changed = true;
+    }
+    let last_good = ensure_object(&mut auth_profiles, "lastGood");
+    if last_good.get(selected_provider).and_then(Value::as_str) != Some(profile_id.as_str()) {
+        last_good.insert(
+            selected_provider.to_string(),
+            Value::String(profile_id.clone()),
+        );
+        auth_profiles_changed = true;
+    }
+    let usage_stats = ensure_object(&mut auth_profiles, "usageStats");
+    if !usage_stats.contains_key(&profile_id) {
+        usage_stats.insert(profile_id.clone(), {
+            let mut stats = Map::new();
+            stats.insert("errorCount".to_string(), Value::from(0));
+            Value::Object(stats)
+        });
+        auth_profiles_changed = true;
+    }
+    if auth_profiles.get("version").and_then(Value::as_u64) != Some(1) {
+        auth_profiles.insert("version".to_string(), Value::from(1));
+        auth_profiles_changed = true;
+    }
+    if auth_profiles_changed {
+        write_json_map_pretty(
+            &auth_profiles_path,
+            &auth_profiles,
+            "serialize managed auth profiles repair",
+        )?;
+    }
+
+    Ok(config_changed || auth_store_changed || auth_profiles_changed)
+}
+
+pub fn inspect_managed_provider_auth_compatibility(
+    managed_home: &Path,
+) -> Result<ManagedProviderAuthCompatibility> {
+    let Some(config_path) = find_openclaw_config_path(managed_home) else {
+        return Ok(ManagedProviderAuthCompatibility::missing_config(
+            managed_home,
+        ));
+    };
+    let config = read_config_map_or_default(&config_path)?;
+    let selected_provider = selected_model_provider(&config);
+    let session_memory_enabled = Value::Object(config.clone())
+        .pointer("/hooks/internal/entries/session-memory/enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let auth_profiles_path = managed_home
+        .join(OPENCLAW_STATE_DIR_NAME)
+        .join(OPENCLAW_AGENT_AUTH_PROFILES_RELATIVE);
+    let auth_store_path = managed_home
+        .join(OPENCLAW_STATE_DIR_NAME)
+        .join(OPENCLAW_AGENT_AUTH_STORE_RELATIVE);
+    let models_path = managed_home
+        .join(OPENCLAW_STATE_DIR_NAME)
+        .join(OPENCLAW_AGENT_MODELS_RELATIVE);
+    let auth_profiles = read_json_map_or_default(&auth_profiles_path)?;
+    let auth_store = read_json_map_or_default(&auth_store_path)?;
+    let models = read_json_map_or_default(&models_path)?;
+
+    let legacy_profile_format = !auth_profiles.contains_key("profiles")
+        && auth_profiles
+            .get("default")
+            .and_then(Value::as_str)
+            .is_some();
+
+    let profile_providers = auth_profiles
+        .get("profiles")
+        .and_then(Value::as_object)
+        .map(|profiles| {
+            profiles
+                .values()
+                .filter_map(Value::as_object)
+                .filter_map(|entry| entry.get("provider").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let selected_provider_api_key = selected_provider
+        .as_deref()
+        .and_then(|provider| provider_api_key(&auth_store, &models, provider));
+    let selected_provider_profile_present = selected_provider
+        .as_deref()
+        .map(|provider| {
+            profile_providers.contains(provider)
+                || config
+                    .get("auth")
+                    .and_then(Value::as_object)
+                    .and_then(|auth| auth.get("profiles"))
+                    .and_then(Value::as_object)
+                    .map(|profiles| {
+                        profiles.values().any(|entry| {
+                            entry
+                                .as_object()
+                                .and_then(|profile| profile.get("provider"))
+                                .and_then(Value::as_str)
+                                == Some(provider)
+                        })
+                    })
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    Ok(ManagedProviderAuthCompatibility {
+        config_path,
+        auth_profiles_path,
+        auth_store_path,
+        selected_provider,
+        selected_provider_api_key,
+        session_memory_enabled,
+        legacy_profile_format,
+        profile_providers: profile_providers.into_iter().collect(),
+        selected_provider_profile_present,
+    })
 }
 
 /// Ensure managed OpenClaw config still contains Agent Ruler tools adapter wiring.
@@ -1845,8 +2143,8 @@ mod tests {
         );
         assert_eq!(
             managed_json.pointer("/hooks/internal/entries/session-memory/enabled"),
-            Some(&Value::from(false)),
-            "session-memory hook should be disabled for non-anthropic primary models"
+            Some(&Value::from(true)),
+            "session-memory hook state should be preserved during import"
         );
 
         let host_after = fs::read_to_string(&host_cfg).expect("read host config after");

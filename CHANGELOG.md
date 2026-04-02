@@ -2,6 +2,31 @@
 
 All notable user-facing changes are documented here.
 
+## [v0.1.10] - 2026-04-02
+
+### Diagnostics and runtime repair
+- Added `agent-ruler doctor` with numbered, runner-aware health checks plus explicit `--repair` targeting (`--repair`, `--repair all`, `--repair 1`, `--repair 1,4,7`).
+- Added actionable Doctor guidance for common runtime failures, including Bubblewrap/AppArmor namespace problems, OpenClaw bridge startup state, provider/auth compatibility, Telegram allowlist baseline, and managed route seeding readiness.
+- Bubblewrap diagnosis now compares the current launcher with a host-like launcher when needed, strips wrapper noise from the reported failure, and only advertises automatic repair when the current session can actually perform the required privileged AppArmor change.
+- OpenClaw bridge diagnosis now treats missing `approvalBridgeRoutes` as compatible with autodiscovery, recognizes the running `openclaw_unconfigured` mode as a healthy startup state, and avoids false failures when approvals are merely waiting on route candidates.
+
+### Runner execution and managed control
+- Fixed `agent-ruler run -- <runner> ...` argument passthrough so full downstream command tails, subcommands, and flags are preserved exactly.
+- Managed runner restart/control flows can no longer escape Agent Ruler: bare runner CLIs are blocked in governed UI/operator command paths, and managed restart commands are intercepted and relaunched through Agent Ruler instead of falling through to native runner restarts.
+- Hardened OpenClaw managed config guards so stale Agent Ruler plugin-path variants are pruned automatically and provider/auth compatibility stays aligned with the selected model provider without disabling session-memory hooks.
+- Reduced misleading Telegram bridge noise by treating retryable command-sync network hiccups as non-fatal health signals and preventing non-selected runner bridge config artifacts from being generated during OpenClaw sync.
+
+### Control Panel and support UX
+- Added a `Help / Feedback` entry in the Control Panel navbar with direct actions for bug reports, ideas/feedback, and support questions.
+- Added `Run Doctor` as the first section in the Execution Layer, including formatted Doctor output, copy-to-clipboard, the real Doctor summary line, and a short recommended next-step message after each run.
+- Cleaned up the One-Shot Command result view so the main output is primary, duplicated/empty stream panels are removed, and the page shows the authoritative `WebUI runtime: ...` summary for the current managed runtime.
+- One-Shot commands now bind nested `agent-ruler` execution to the active WebUI runtime/root, suppress irrelevant UI auto-bind chatter in that path, and keep stderr free of misleading cross-runner bridge diagnostics.
+- Fixed the release-notes modal layout so the notes body uses the available width consistently instead of collapsing into a narrow column.
+
+### Project support and release metadata
+- Added a GitHub bug-report issue form tailored to Agent Ruler diagnostics and configured the template chooser to send feedback/questions to GitHub Discussions.
+- Updated release metadata, plugin metadata, docs package metadata, and hook metadata to `v0.1.10`.
+
 ## [v0.1.9-2] - 2026-03-30
 
 ### Policy and OpenClaw runtime fixes

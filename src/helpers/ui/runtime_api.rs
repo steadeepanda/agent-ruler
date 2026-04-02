@@ -492,10 +492,6 @@ pub fn sync_selected_runner_telegram_bridges(
     force_restart_claudecode: bool,
     force_restart_opencode: bool,
 ) -> anyhow::Result<()> {
-    let claudecode_config = ensure_generated_claudecode_bridge_config(runtime)?;
-    let claudecode_path = claudecode_bridge_config_path(runtime);
-    let opencode_config = ensure_generated_opencode_bridge_config(runtime)?;
-    let opencode_path = opencode_bridge_config_path(runtime);
     let selected = selected_runner_bridge_kind(runtime);
 
     // Stop non-selected runner bridge first to avoid Telegram token lock
@@ -506,6 +502,8 @@ pub fn sync_selected_runner_telegram_bridges(
     // availability right after setup/config updates.
     match selected {
         Some(RunnerTelegramBridgeKind::Claudecode) => {
+            let claudecode_config = ensure_generated_claudecode_bridge_config(runtime)?;
+            let claudecode_path = claudecode_bridge_config_path(runtime);
             stop_runner_bridge_process(runtime, RunnerTelegramBridgeKind::Opencode)?;
             sync_runner_bridge_process(
                 runtime,
@@ -516,6 +514,8 @@ pub fn sync_selected_runner_telegram_bridges(
             )?;
         }
         Some(RunnerTelegramBridgeKind::Opencode) => {
+            let opencode_config = ensure_generated_opencode_bridge_config(runtime)?;
+            let opencode_path = opencode_bridge_config_path(runtime);
             stop_runner_bridge_process(runtime, RunnerTelegramBridgeKind::Claudecode)?;
             sync_runner_bridge_process(
                 runtime,

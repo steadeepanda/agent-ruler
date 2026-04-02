@@ -28,6 +28,8 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config::RuntimeState;
 use crate::policy::PolicyEngine;
+
+const UI_ONE_SHOT_RUNTIME_ENV: &str = "AGENT_RULER_UI_ONE_SHOT";
 use crate::utils::looks_like_glob;
 
 /// Check if bubblewrap is available on this system.
@@ -113,6 +115,7 @@ pub fn build_confined_command(
         .shared_zone_dir
         .canonicalize()
         .unwrap_or_else(|_| runtime.config.shared_zone_dir.clone());
+    let allow_ui_runtime_state = command_requests_ui_one_shot_runtime(cmd);
 
     let mut command = Command::new("bwrap");
     command
@@ -156,11 +159,17 @@ pub fn build_confined_command(
     for path in runner_managed_data_paths(runtime) {
         command.arg("--bind").arg(&path).arg(&path);
     }
+    if allow_ui_runtime_state {
+        command
+            .arg("--bind")
+            .arg(&runtime.config.state_dir)
+            .arg(&runtime.config.state_dir);
+    }
 
     // Security: mask secrets with empty files/dirs
     add_secret_masks(&mut command, runtime, engine)?;
     // Security: mask agent-ruler's own state files and runtime internals
-    add_runtime_state_masks(&mut command, runtime)?;
+    add_runtime_state_masks(&mut command, runtime, allow_ui_runtime_state)?;
 
     // Security: use kernel-level network namespace only when policy represents
     // an effective "deny all" posture. If explicit host mediation is configured,
@@ -310,7 +319,11 @@ fn add_secret_masks(
 /// Since we use --tmpfs /tmp, paths under /tmp don't exist in the sandbox until
 /// we create them with --dir or bind-mount them. We need to ensure parent
 /// directories exist before bind-mounting mask targets.
-fn add_runtime_state_masks(command: &mut Command, runtime: &RuntimeState) -> Result<()> {
+fn add_runtime_state_masks(
+    command: &mut Command,
+    runtime: &RuntimeState,
+    allow_state_dir_access: bool,
+) -> Result<()> {
     // Use system temp directory for mask artifacts to avoid conflicts with /tmp tmpfs
     let mask_root = std::env::temp_dir().join("agent-ruler-sandbox-masks");
     let empty_dir = mask_root.join("empty-dir");
@@ -328,7 +341,9 @@ fn add_runtime_state_masks(command: &mut Command, runtime: &RuntimeState) -> Res
 
     // Always mask the state directory - this contains all runtime internals
     // (policy.yaml, approvals.json, receipts.jsonl, exec-layer/, etc.)
-    hidden_dirs.push(runtime.config.state_dir.clone());
+    if !allow_state_dir_access {
+        hidden_dirs.push(runtime.config.state_dir.clone());
+    }
 
     // Also mask the exports directory if it exists within runtime_root
     // (this is the default delivery destination, not operator-accessible)
@@ -382,6 +397,16 @@ fn add_runtime_state_masks(command: &mut Command, runtime: &RuntimeState) -> Res
     }
 
     Ok(())
+}
+
+fn command_requests_ui_one_shot_runtime(cmd: &[String]) -> bool {
+    if cmd.first().map(String::as_str) != Some("env") {
+        return false;
+    }
+    cmd.iter()
+        .skip(1)
+        .take_while(|token| token.contains('='))
+        .any(|token| token == &format!("{UI_ONE_SHOT_RUNTIME_ENV}=1"))
 }
 
 fn should_unshare_network_namespace(engine: &PolicyEngine, cmd: &[String]) -> bool {

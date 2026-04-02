@@ -55,6 +55,26 @@ Then launch the managed gateway:
 agent-ruler run -- openclaw gateway
 ```
 
+## [User] Quick diagnostics with `agent-ruler doctor`
+
+Use Doctor first when runtime behavior and logs disagree:
+
+```bash
+agent-ruler doctor
+agent-ruler doctor --repair
+agent-ruler doctor --repair all
+agent-ruler doctor --repair 4
+agent-ruler doctor --repair 4,7
+agent-ruler doctor --json
+```
+
+Interpretation notes:
+- Doctor numbers every check. Use those numbers with `--repair`.
+- Runner-specific checks are scoped to the active runner. For non-OpenClaw runtimes, OpenClaw checks are reported as not-applicable instead of warn/fail.
+- Missing OpenClaw `approvalBridgeRoutes` can be valid when channel-default autodiscovery is active.
+- If the bridge log reports `source=openclaw_unconfigured routes=0`, Doctor now reports that bridge startup is working but approval delivery is still deferred until route candidates are present.
+- `--repair` only performs explicit safe local changes for the selected checks and reports each repair action.
+
 ## [User] Claude Code auth missing or not logged in
 
 This usually means the managed Claude Code runtime does not have usable auth yet.
@@ -102,7 +122,8 @@ agent-ruler setup
 
 Behavior note:
 - setup now fails fast when managed auth or model requirements are incomplete
-- for non-Anthropic primary models, Agent Ruler disables the managed `session-memory` hook to avoid Anthropic fallback from slug-generation lanes
+- Agent Ruler now repairs managed provider/auth compatibility at the auth-profile layer instead of disabling the `session-memory` hook
+- `agent-ruler run -- openclaw ...` now enforces the same provider/auth compatibility guard before command execution so hook-driven background lanes do not drift to stale Anthropic defaults
 
 ## [User] Agent blocks waiting for approval
 
@@ -153,6 +174,7 @@ Checks:
 
 ```bash
 agent-ruler run -- openclaw gateway stop
+# only if you intentionally need to clean up an external/non-Agent-Ruler OpenClaw
 openclaw gateway stop
 systemctl --user stop openclaw-gateway.service
 ss -ltnp | rg openclaw
@@ -220,6 +242,12 @@ time OPENCLAW_HOME="$MANAGED_HOME" \
 
 If each command takes multiple seconds, the host is hitting the slow-start path.
 
+Doctor interpretation for this case:
+- if `approvalBridgeRoutes` is missing but `channels` read is healthy, Doctor should not mark this as a hard failure
+- route-pointer missing is compatible with bridge channel-default autodiscovery
+- if the active bridge log shows `openclaw_unconfigured`, startup is considered healthy, but approvals remain deferred until a sender is paired or `allowFrom` data exists
+- `agent-ruler doctor --repair 4` can only persist routes after OpenClaw has actual route candidates in `channels.*.allowFrom` or `credentials/*-allowFrom.json`
+
 Workarounds on affected machines:
 - Seed the bridge routes once so startup does not need to auto-discover them.
 - Re-run the gateway after the managed routes exist.
@@ -252,19 +280,29 @@ agent-ruler status --json | jq -r '.runtime_root'
 Fix path:
 1. Ensure `bubblewrap` is installed.
 2. Enable unprivileged user namespaces if your distro requires it.
-3. If the host uses AppArmor user-namespace restriction, allow Bubblewrap specifically via AppArmor instead of disabling AppArmor globally.
+3. On Ubuntu-family hosts using AppArmor user-namespace restriction, install a Bubblewrap-specific AppArmor profile for `/usr/bin/bwrap` instead of disabling AppArmor globally.
 
-Fast AppArmor confirmation step on Ubuntu-family hosts:
+Ubuntu/AppArmor remediation target:
 
 ```bash
-sudo aa-complain /usr/bin/bwrap
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>, include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
-If that resolves the failure, replace the temporary complain-mode workaround with a Bubblewrap-specific local AppArmor allow rule for `/usr/bin/bwrap`, then reload AppArmor. Do not disable AppArmor system-wide just to make Agent Ruler run.
+Doctor targets that same file/reload path when check `1` is truly auto-repairable in the current session. If passwordless `sudo` or AppArmor tooling is unavailable, Doctor stays manual-only and says so explicitly. Do not disable AppArmor system-wide just to make Agent Ruler run.
 
 Behavior note:
 - OpenClaw gateway launches can still fall back to managed host mode on some blocked hosts.
 - Claude Code and OpenCode runner commands fail closed when Bubblewrap is unavailable.
+- Snap-confined shells and regular terminals can report different current-launcher results. Doctor now surfaces both the current launcher and a host-like launcher probe so the mismatch is explicit instead of silently flipping status between UI and terminal.
+- Doctor only advertises `--repair 1` for this class of failure when it can actually install `/etc/apparmor.d/bwrap` and reload AppArmor in the current session. If operator-auth root or AppArmor tooling is missing, the check remains manual-only instead of pretending to auto-repair.
+- The Control Panel Doctor view shows the same summary line and remediation guidance as the CLI, so mismatches between UI and terminal should now reflect real launcher-context differences rather than stale formatting or probe noise.
 
 ## [User] OpenCode web error: `attempt to write a readonly database`
 
@@ -370,7 +408,8 @@ If the host is network-restricted, allow `api.telegram.org` in policy.
 
 ## [User] Telegram `setMyCommands` or `deleteMyCommands` network failures
 
-This usually means Telegram command sync could not reach Telegram API, or the managed token/config is missing.
+This usually means Telegram command sync could not reach Telegram API at that moment, or the managed token/config is missing.
+It can be transient and non-fatal when Telegram messaging/approvals still work.
 
 Checks:
 
@@ -388,6 +427,11 @@ agent-ruler setup
 ```
 
 If token exists but sync still fails, check whether policy is isolating network egress and blocking `api.telegram.org`.
+
+Doctor interpretation:
+- command-sync network failures are advisory by themselves
+- Doctor now checks both the OpenClaw bridge log and gateway log, because the signal can exist in the bridge log even when the gateway log is absent
+- if Telegram delivery is healthy, treat this as retryable noise rather than a hard runtime failure
 
 ## [User] Telegram shows `Message received` but no runner reply
 

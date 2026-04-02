@@ -8,7 +8,7 @@ If you are still on setup, start with [Getting Started](/guides/getting-started)
 <details>
 <summary><strong>Open WebUI showcase video</strong></summary>
 
-This recording shows the redesigned Control Panel flow for `v0.1.9-2`.
+This recording shows the redesigned Control Panel flow for `v0.1.10`.
 The clip itself still shows `v0.1.8` in the UI because the version label was not updated before export.
 
 <p align="center">
@@ -28,6 +28,7 @@ The clip itself still shows `v0.1.8` in the UI because the version label was not
 - `Runtime Paths`: shared-zone and default delivery locations
 - `Control Settings`: UI/debug/runtime Control Panel settings
 - `Execution Layer`: one-shot troubleshooting runner, exec-layer reset, and full runtime reset
+- `Help / Feedback`: bug reports, ideas, documentation, and support links
 - `Timeline`: receipts and filtering
 - `Runners`: per-runner install/health/mode/capability/config visibility
 
@@ -153,15 +154,34 @@ From the `Execution Layer` page:
 
 This makes recovery fast when something breaks, without forcing reinstall/reconfiguration every time.
 
-## One-shot command runner
+## Execution Layer
 
-The `Execution Layer` page includes a one-shot command runner for deterministic troubleshooting.
+The `Execution Layer` page starts with `Run Doctor`, followed by the one-shot command runner and reset actions.
+
+`Run Doctor`:
+- runs the same `agent-ruler doctor` checks available in the CLI
+- shows the real Doctor summary line from the report
+- shows a short recommended next step after each run
+- lets you copy the full Doctor output directly from the page
+
+The one-shot command runner is for deterministic troubleshooting.
 
 - Runs through `/api/run/script`
-- Returns exit code, confinement mode, stdout, stderr
+- Binds `agent-ruler` calls to the current WebUI runtime and ruler root, so the page stays the source of truth for operator diagnostics
+- Blocks bare runner CLIs such as `openclaw ...` and tells you to use `agent-ruler run -- ...` instead
+- Shows the authoritative `WebUI runtime: ...` summary line for the active managed runtime
+- Keeps the main command output prominent and avoids empty or duplicated stream panels
 - Writes receipts visible in Timeline
 
 Use this for operator diagnostics, not as a replacement for normal agent task pipelines.
+
+## Help / Feedback
+
+The `Help / Feedback` page gives operators one place to:
+
+- open the GitHub bug-report form with Doctor-oriented guidance
+- send ideas and feature feedback to GitHub Discussions
+- jump to the documentation and support checklist before opening a bug
 
 ## Next pages
 

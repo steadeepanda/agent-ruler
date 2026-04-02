@@ -25,7 +25,7 @@ use crate::helpers::approvals::{
     append_approval_resolution_receipt, append_bulk_approval_resolution_receipt,
 };
 use crate::helpers::ui::payloads::{
-    ApprovalQuery, ApprovalWaitQuery, ApprovalWaitResponse, BulkApprovalResult,
+    ApprovalQuery, ApprovalWaitQuery, ApprovalWaitResponse, BulkApprovalResult, DoctorPayload,
     RedactedStatusEvent, ResetRuntimePayload, RunCommandPayload, RunScriptPayload, StatusFeedQuery,
     TogglePayload, UpdateApplyPayload,
 };
@@ -45,6 +45,11 @@ use crate::model::ApprovalStatus;
 use crate::policy::PolicyEngine;
 use crate::receipts::ReceiptStore;
 use crate::runner::run_confined;
+use crate::utils::resolve_command_path;
+use crate::{
+    doctor,
+    doctor::{DoctorOptions, RepairSelection},
+};
 
 const DOCS_ROOT_RELATIVE: &str = "docs-site/docs";
 const DOCS_DIST_RELATIVE: &str = "docs-site/docs/.vitepress/dist";
@@ -81,6 +86,7 @@ pub fn build_router(state: WebState) -> Router {
         .route("/runtime", get(ui_pages::index_runtime))
         .route("/settings", get(ui_pages::index_settings))
         .route("/execution", get(ui_pages::index_execution))
+        .route("/help-feedback", get(ui_pages::index_help_feedback))
         .route("/docs", get(ui_pages::index_docs))
         .route(
             "/assets/design-tokens.css",
@@ -169,6 +175,7 @@ pub fn build_router(state: WebState) -> Router {
         .route("/api/reset-runtime", post(api_reset_runtime))
         .route("/api/run/script", post(api_run_script))
         .route("/api/run/command", post(api_run_command))
+        .route("/api/doctor", post(api_doctor))
         .route(
             "/api/runners/:id/tool/preflight",
             post(ui_runner_tool_preflight_common::api_runner_tool_preflight),
@@ -254,7 +261,11 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::loopback_mirror_addr;
-    use super::{manifest_docs_dist_dir, resolve_docs_paths};
+    use super::{
+        manifest_docs_dist_dir, resolve_docs_paths, shell_single_quote, ui_command_summary_line,
+        wrap_one_shot_script_with_exe,
+    };
+    use crate::config::{init_layout, load_runtime};
     use tempfile::tempdir;
 
     #[test]
@@ -291,6 +302,39 @@ mod tests {
         let resolved = resolve_docs_paths(temp.path());
         let expected: PathBuf = manifest_docs_dist_dir();
         assert_eq!(resolved.dist_dir, expected);
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_single_quotes() {
+        assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn wrap_one_shot_script_binds_agent_ruler_to_runtime() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let runtime_root = temp.path().join("runtime");
+        init_layout(&project, Some(&runtime_root), None, true).expect("init layout");
+        let runtime = load_runtime(&project, Some(&runtime_root)).expect("load runtime");
+
+        let resolved = temp.path().join("agent-ruler");
+        fs::write(&resolved, "#!/bin/sh\nexit 0\n").expect("write fake agent-ruler");
+        let script =
+            wrap_one_shot_script_with_exe(&runtime, "agent-ruler status --json", &resolved)
+                .expect("wrap one-shot script");
+
+        assert!(script.contains("alias agent-ruler=agent_ruler_managed"));
+        assert!(script.contains(resolved.to_string_lossy().as_ref()));
+        assert!(script.contains(runtime.config.runtime_root.to_string_lossy().as_ref()));
+        assert!(script.contains(runtime.config.ruler_root.to_string_lossy().as_ref()));
+        assert!(script.contains("AGENT_RULER_ROOT="));
+        assert!(script.contains("AGENT_RULER_SUPPRESS_UI_AUTOBIND=1"));
+        assert!(script.contains("if [ -d"));
+        assert!(script.contains("Use `agent-ruler run -- %s ...` in One-Shot Command"));
+        assert_eq!(
+            ui_command_summary_line(&runtime),
+            format!("WebUI runtime: {}", runtime.config.runtime_root.display())
+        );
     }
 }
 
@@ -1102,7 +1146,8 @@ async fn api_capabilities() -> impl IntoResponse {
                 "/api/ui/logs",
                 "/api/ui/logs/event",
                 "/api/run/script",
-                "/api/run/command"
+                "/api/run/command",
+                "/api/doctor"
             ],
 
             // Tool-to-endpoint mapping for runner adapters (OpenClaw, etc.)
@@ -1256,13 +1301,20 @@ async fn api_run_script(
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
+    let script = match wrap_one_shot_script(&runtime, &payload.script) {
+        Ok(script) => script,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
     let cmd = vec![
+        "env".to_string(),
+        "AGENT_RULER_UI_ONE_SHOT=1".to_string(),
         "bash".to_string(),
         "-lc".to_string(),
-        payload.script.clone(),
+        script,
     ];
+    let summary = ui_command_summary_line(&runtime);
 
-    run_ui_command(runtime, cmd)
+    run_ui_command(runtime, cmd, Some(summary))
 }
 
 async fn api_run_command(
@@ -1286,7 +1338,33 @@ async fn api_run_command(
         Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
-    run_ui_command(runtime, prepared)
+    let summary = ui_command_summary_line(&runtime);
+    run_ui_command(runtime, prepared, Some(summary))
+}
+
+async fn api_doctor(
+    State(state): State<WebState>,
+    Json(payload): Json<DoctorPayload>,
+) -> impl IntoResponse {
+    let mut runtime = match load_runtime_from_state(&state) {
+        Ok(runtime) => runtime,
+        Err(err) => return error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+
+    let repair = payload.repair.unwrap_or(false);
+    match doctor::run(
+        &mut runtime,
+        DoctorOptions {
+            repair: if repair {
+                RepairSelection::All
+            } else {
+                RepairSelection::None
+            },
+        },
+    ) {
+        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))).into_response(),
+        Err(err) => error_response(StatusCode::BAD_REQUEST, err.to_string()),
+    }
 }
 
 async fn api_update_check(State(state): State<WebState>) -> impl IntoResponse {
@@ -1433,7 +1511,11 @@ fn run_update_subcommand(
         .with_context(|| "parse update command JSON output")
 }
 
-fn run_ui_command(runtime: RuntimeState, cmd: Vec<String>) -> Response {
+fn run_ui_command(
+    runtime: RuntimeState,
+    cmd: Vec<String>,
+    summary_line: Option<String>,
+) -> Response {
     let approvals = ApprovalStore::new(&runtime.config.approvals_file);
     let receipts = ReceiptStore::new(&runtime.config.receipts_file);
     let engine = PolicyEngine::new(runtime.policy.clone(), runtime.config.workspace.clone());
@@ -1447,6 +1529,7 @@ fn run_ui_command(runtime: RuntimeState, cmd: Vec<String>) -> Response {
                 "confinement": result.confinement,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "summary_line": summary_line,
             })),
         )
             .into_response(),
@@ -1458,6 +1541,7 @@ fn run_ui_command(runtime: RuntimeState, cmd: Vec<String>) -> Response {
                 "confinement": result.confinement,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "summary_line": summary_line,
                 "error": format!("command exited with code {}", result.exit_code),
             })),
         )
@@ -1466,11 +1550,80 @@ fn run_ui_command(runtime: RuntimeState, cmd: Vec<String>) -> Response {
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "status": "failed",
+                "summary_line": summary_line,
                 "error": err.to_string(),
             })),
         )
             .into_response(),
     }
+}
+
+fn ui_command_summary_line(runtime: &RuntimeState) -> String {
+    format!("WebUI runtime: {}", runtime.config.runtime_root.display())
+}
+
+fn wrap_one_shot_script(runtime: &RuntimeState, script: &str) -> Result<String> {
+    let agent_ruler_exe = resolve_agent_ruler_executable_for_ui()?;
+    wrap_one_shot_script_with_exe(runtime, script, &agent_ruler_exe)
+}
+
+fn wrap_one_shot_script_with_exe(
+    runtime: &RuntimeState,
+    script: &str,
+    agent_ruler_exe: &Path,
+) -> Result<String> {
+    let exe = shell_single_quote(agent_ruler_exe.to_string_lossy().as_ref());
+    let runtime_dir = shell_single_quote(runtime.config.runtime_root.to_string_lossy().as_ref());
+    let ruler_root = shell_single_quote(runtime.config.ruler_root.to_string_lossy().as_ref());
+    Ok(format!(
+        r#"shopt -s expand_aliases
+agent_ruler_managed() {{
+  (
+    if [ -d {ruler_root} ]; then
+      cd {ruler_root}
+    fi
+    AGENT_RULER_ROOT={ruler_root} AR_DIR={ruler_root} AGENT_RULER_SUPPRESS_UI_AUTOBIND=1 {exe} --runtime-dir {runtime_dir} "$@"
+  )
+}}
+alias agent-ruler=agent_ruler_managed
+ui_one_shot_runner_block() {{
+  local runner="$1"
+  printf 'Use `agent-ruler run -- %s ...` in One-Shot Command so the current WebUI runtime remains authoritative.\n' "$runner" >&2
+  return 64
+}}
+openclaw() {{ ui_one_shot_runner_block openclaw; }}
+claude() {{ ui_one_shot_runner_block claude; }}
+opencode() {{ ui_one_shot_runner_block opencode; }}
+
+{script}"#
+    ))
+}
+
+fn resolve_agent_ruler_executable_for_ui() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_agent-ruler") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        let is_agent_ruler = current_exe
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.starts_with("agent-ruler"))
+            .unwrap_or(false);
+        if is_agent_ruler {
+            return Ok(current_exe);
+        }
+    }
+
+    resolve_command_path("agent-ruler")
+        .ok_or_else(|| anyhow!("resolve `agent-ruler` executable for WebUI one-shot command"))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 pub(crate) fn load_runtime_from_state(state: &WebState) -> Result<RuntimeState> {

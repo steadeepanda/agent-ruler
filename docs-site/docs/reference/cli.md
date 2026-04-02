@@ -49,6 +49,7 @@ in terminal output.
 - `agent-ruler setup`
 - `agent-ruler run -- <cmd...>`
 - `agent-ruler run --background -- <cmd...>`
+- `agent-ruler doctor [--repair [all|N|N,N...]] [--json]`
 - `agent-ruler status [--json]`
 - `agent-ruler tail [lines]`
 - `agent-ruler approve --decision <list|approve|deny> [--id ...|--all]`
@@ -93,8 +94,33 @@ Missing runner reminder behavior:
 ## Operator checks
 
 - `agent-ruler smoke [--non-interactive]`
+- `agent-ruler doctor [--repair [all|N|N,N...]] [--json]`
 - `agent-ruler wait --id <approval-id> [--timeout <seconds>] [--json]`
 - `agent-ruler ui [--bind 127.0.0.1:4622]`
+
+## Doctor command
+
+Use `doctor` to inspect common runtime health issues:
+
+```bash
+agent-ruler doctor
+agent-ruler doctor --repair
+agent-ruler doctor --repair all
+agent-ruler doctor --repair 4
+agent-ruler doctor --repair 4,7
+agent-ruler doctor --json
+```
+
+Behavior notes:
+- Doctor numbers each check so repair targets stay stable and explicit.
+- Runner-specific checks are scoped to the active runner and reported as not-applicable otherwise.
+- Bubblewrap is probed against the current launcher context and, on Linux, a host-like `systemd-run --user` launcher when the current process is confined differently.
+- Bubblewrap/AppArmor output is sanitized for user-facing diagnosis; Doctor strips `systemd-run` service bookkeeping and keeps the actionable probe detail.
+- Bubblewrap/AppArmor namespace failures target the concrete Ubuntu/AppArmor remediation path of installing `/etc/apparmor.d/bwrap` with an unconfined `/usr/bin/bwrap` profile that enables `userns`, then reloading AppArmor.
+- Bubblewrap/AppArmor namespace failures are only marked repairable when Doctor can actually install `/etc/apparmor.d/bwrap` and reload AppArmor in the current session. Otherwise the check stays manual-only and explains the precise privilege/tooling limitation.
+- OpenClaw route-pointer missing (`approvalBridgeRoutes`) is treated as compatible with channel-default autodiscovery, not a hard failure by itself.
+- When the OpenClaw bridge is already running in `openclaw_unconfigured` mode, Doctor reports that startup is healthy while approval delivery is still deferred until route candidates exist.
+- `--repair` applies only the selected safe local repairs (for example managed OpenClaw route seeding when route candidates exist, Telegram allowlist baseline, provider/auth compatibility repair).
 
 ## Native runner command support
 
@@ -109,6 +135,7 @@ agent-ruler run --
 
 ```bash
 agent-ruler run -- openclaw gateway
+agent-ruler run -- openclaw gateway restart
 agent-ruler run -- openclaw gateway stop
 agent-ruler stop run -- openclaw
 ```
@@ -124,6 +151,8 @@ Gateway runtime files:
 - PID metadata: `<runtime>/user_data/logs/openclaw-gateway.pid.json`
 
 `gateway stop` uses only recorded managed PID metadata and clears stale record files when the process is already gone.
+`gateway restart` is intercepted by Agent Ruler and executed as a managed stop + managed relaunch instead of passing a bare runner restart through unchanged.
+The same managed-wrapper requirement applies in the Control Panel one-shot runner: use `agent-ruler run -- ...`, not bare `openclaw`, `claude`, or `opencode` commands.
 
 New stop UX aliases:
 - `agent-ruler stop ui` is equivalent to `agent-ruler ui stop`.

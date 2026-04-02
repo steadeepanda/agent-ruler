@@ -46,7 +46,7 @@ use ::agent_ruler::runners::claudecode::{
     enforce_managed_settings_guard, ensure_managed_settings_seed, managed_auth_logged_in,
 };
 use ::agent_ruler::runners::openclaw::{
-    enforce_session_memory_hook_guard, enforce_tools_adapter_config_guard,
+    enforce_managed_provider_auth_compatibility, enforce_tools_adapter_config_guard,
     find_managed_gateway_listener_pid, inspect_managed_telegram_config,
     maybe_collect_gateway_port_diagnostics,
 };
@@ -62,9 +62,11 @@ use ::agent_ruler::staged_exports::{StagedExportState, StagedExportStore};
 use ::agent_ruler::ui;
 
 use crate::cli::{
-    resolve_approval_targets, run_delivery, run_export, run_import, run_manual_smoke, run_purge,
-    run_runner_remove, run_setup, run_update, run_wait_for_approval,
+    resolve_approval_targets, run_delivery, run_doctor, run_export, run_import, run_manual_smoke,
+    run_purge, run_runner_remove, run_setup, run_update, run_wait_for_approval,
 };
+
+const SUPPRESS_UI_AUTOBIND_ENV: &str = "AGENT_RULER_SUPPRESS_UI_AUTOBIND";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -89,6 +91,12 @@ enum Commands {
         force: bool,
     },
     Setup,
+    Doctor {
+        #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+        repair: Option<String>,
+        #[arg(long, hide = true)]
+        json: bool,
+    },
     Run {
         #[arg(long)]
         background: bool,
@@ -282,13 +290,39 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Setup => run_setup(&ruler_root, runtime_dir.as_deref()),
+        Commands::Doctor { repair, json } => {
+            run_doctor(&ruler_root, runtime_dir.as_deref(), repair.as_deref(), json)
+        }
         Commands::Run {
             background,
             foreground,
-            cmd,
+            mut cmd,
         } => {
             let mut runtime = load_runtime(&ruler_root, runtime_dir.as_deref())
                 .context("load runtime (run `agent-ruler init` first)")?;
+
+            if is_openclaw_gateway_restart(&cmd) {
+                let gateway_stopped = stop_managed_background_gateway(&runtime)?;
+                let bridge_stopped = stop_managed_openclaw_bridge(&runtime)?;
+                let runner_bridges_stopped = stop_managed_runner_bridges(&runtime)?;
+                if !(gateway_stopped && bridge_stopped && runner_bridges_stopped) {
+                    return Err(anyhow!(
+                        "gateway restart failed: one or more managed processes are still running (see log for details)"
+                    ));
+                }
+                cmd = managed_restart_launch_command(ManagedRestartKind::OpenclawGateway);
+            }
+
+            if let Some(web_kind) = runner_web_restart_kind(&cmd) {
+                let web_stopped = stop_managed_runner_web(&runtime, web_kind)?;
+                if !web_stopped {
+                    return Err(anyhow!(
+                        "{} web restart failed: managed process is still running (see log for details)",
+                        web_kind.id()
+                    ));
+                }
+                cmd = managed_restart_launch_command(web_kind.restart_kind());
+            }
 
             if is_openclaw_gateway_stop(&cmd) {
                 let gateway_stopped = stop_managed_background_gateway(&runtime)?;
@@ -469,27 +503,33 @@ pub async fn run() -> Result<()> {
                         );
                     }
                 }
-
-                ensure_openclaw_preflight_api_ready(&runtime, &cmd)?;
-            }
-
-            ensure_runner_tool_preflight_api_ready(&runtime, &cmd)?;
-
-            if is_openclaw_gateway_launch(&cmd) {
                 let managed_home = managed_openclaw_home(&runtime);
-                match enforce_session_memory_hook_guard(&managed_home) {
+                match enforce_managed_provider_auth_compatibility(&managed_home) {
                     Ok(true) => {
-                        eprintln!("gateway config guard: disabled session-memory hook for non-anthropic model defaults.");
+                        eprintln!(
+                            "runner config guard: repaired OpenClaw provider/auth compatibility for the selected model provider."
+                        );
                     }
                     Ok(false) => {}
                     Err(err) => {
                         eprintln!(
-                            "gateway config guard: unable to apply managed config guard: {err}"
+                            "runner config guard: unable to repair OpenClaw provider/auth compatibility: {err}"
                         );
                     }
                 }
+
+                ensure_openclaw_preflight_api_ready(&runtime, &cmd)
+                    .map_err(attach_doctor_guidance)?;
+            }
+
+            ensure_runner_tool_preflight_api_ready(&runtime, &cmd)
+                .map_err(attach_doctor_guidance)?;
+
+            if is_openclaw_gateway_launch(&cmd) {
                 print_gateway_telegram_hints(&runtime);
-                match maybe_start_managed_openclaw_bridge(&runtime)? {
+                match maybe_start_managed_openclaw_bridge(&runtime)
+                    .map_err(attach_doctor_guidance)?
+                {
                     BridgeStartupState::NotRequired => {
                         eprintln!(
                             "bridge diagnostics: no bridge routes discovered; skipping approvals hook sync."
@@ -554,7 +594,8 @@ pub async fn run() -> Result<()> {
 
             let effective_cmd = apply_runner_env_overrides(&runtime, &normalized_runner_cmd);
             let structured_kind = detect_structured_output_kind(&effective_cmd);
-            let run = run_confined(&effective_cmd, &runtime, &engine, &approvals, &receipts)?;
+            let run = run_confined(&effective_cmd, &runtime, &engine, &approvals, &receipts)
+                .map_err(attach_doctor_guidance)?;
             let auth_hint = runner_auth_prerequisite_hint(&effective_cmd, &run.stdout, &run.stderr);
             let mut auth_hint_emitted = false;
             if let Some(kind) = structured_kind {
@@ -591,6 +632,11 @@ pub async fn run() -> Result<()> {
                     &run.stdout,
                     &run.stderr,
                 );
+                if let Some(guidance) =
+                    runtime_doctor_guidance_for_text(&format!("{}\n{}", run.stdout, run.stderr))
+                {
+                    eprintln!("{guidance}");
+                }
                 std::process::exit(run.exit_code);
             }
             Ok(())
@@ -2396,6 +2442,32 @@ fn runner_web_stop_kind(cmd: &[String]) -> Option<RunnerWebKind> {
     None
 }
 
+fn runner_web_restart_kind(cmd: &[String]) -> Option<RunnerWebKind> {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.len() < 3 {
+        return None;
+    }
+    if tokens[0] == "opencode" && tokens[1] == "web" && tokens[2] == "restart" {
+        return Some(RunnerWebKind::Opencode);
+    }
+    if tokens[0] == "claude"
+        && (tokens[1] == "web" || tokens[1] == "remote-control")
+        && tokens[2] == "restart"
+    {
+        return Some(RunnerWebKind::Claudecode);
+    }
+    None
+}
+
+impl RunnerWebKind {
+    fn restart_kind(self) -> ManagedRestartKind {
+        match self {
+            RunnerWebKind::Claudecode => ManagedRestartKind::ClaudecodeRemoteControl,
+            RunnerWebKind::Opencode => ManagedRestartKind::OpencodeWeb,
+        }
+    }
+}
+
 fn is_runner_web_launch(cmd: &[String]) -> bool {
     runner_web_kind_for_launch_command(cmd).is_some()
 }
@@ -2414,9 +2486,13 @@ fn runner_command_is_control_only(cmd: &[String]) -> bool {
 
     matches!(
         (tokens[0], tokens[1], tokens[2]),
-        ("openclaw", "gateway", "stop" | "status")
-            | ("opencode", "web", "stop" | "status")
-            | ("claude", "remote-control" | "web", "stop" | "status")
+        ("openclaw", "gateway", "stop" | "status" | "restart")
+            | ("opencode", "web", "stop" | "status" | "restart")
+            | (
+                "claude",
+                "remote-control" | "web",
+                "stop" | "status" | "restart"
+            )
     )
 }
 
@@ -3239,6 +3315,9 @@ fn detect_tailscale_ipv4() -> Result<Option<String>> {
 }
 
 fn maybe_auto_configure_ui_bind_for_tailscale(runtime: &mut RuntimeState) {
+    if std::env::var_os(SUPPRESS_UI_AUTOBIND_ENV).is_some() {
+        return;
+    }
     let local_bind = preferred_ui_bind(&runtime.config.ui_bind, None);
 
     let desired_bind = match detect_tailscale_ipv4() {
@@ -3291,12 +3370,39 @@ fn normalize_openclaw_gateway_launch_command(cmd: &[String]) -> Vec<String> {
     cmd.to_vec()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedRestartKind {
+    OpenclawGateway,
+    ClaudecodeRemoteControl,
+    OpencodeWeb,
+}
+
 fn is_openclaw_gateway_stop(cmd: &[String]) -> bool {
     let tokens = command_tokens_without_env_prefix(cmd);
     if tokens.len() < 3 {
         return false;
     }
     tokens[0] == "openclaw" && tokens[1] == "gateway" && tokens[2] == "stop"
+}
+
+fn is_openclaw_gateway_restart(cmd: &[String]) -> bool {
+    let tokens = command_tokens_without_env_prefix(cmd);
+    if tokens.len() < 3 {
+        return false;
+    }
+    tokens[0] == "openclaw" && tokens[1] == "gateway" && tokens[2] == "restart"
+}
+
+fn managed_restart_launch_command(kind: ManagedRestartKind) -> Vec<String> {
+    match kind {
+        ManagedRestartKind::OpenclawGateway => {
+            vec!["openclaw".to_string(), "gateway".to_string()]
+        }
+        ManagedRestartKind::ClaudecodeRemoteControl => {
+            vec!["claude".to_string(), "remote-control".to_string()]
+        }
+        ManagedRestartKind::OpencodeWeb => vec!["opencode".to_string(), "web".to_string()],
+    }
 }
 
 fn command_tokens_without_env_prefix(cmd: &[String]) -> Vec<&str> {
@@ -3414,7 +3520,7 @@ fn print_openclaw_gateway_port_diagnostics(
     }
 
     eprintln!("gateway diagnostics remediation:");
-    eprintln!("  1) openclaw gateway stop");
+    eprintln!("  1) agent-ruler run -- openclaw gateway stop");
     eprintln!("  2) systemctl --user stop openclaw-gateway.service");
     eprintln!("  3) if still listening, identify PID above and run: kill <pid>");
 }
@@ -3472,7 +3578,8 @@ fn print_openclaw_gateway_telegram_diagnostics(
     if !looks_like_telegram_command_sync_failure(stdout, stderr) {
         return;
     }
-    eprintln!("telegram diagnostics: detected Telegram command sync failure (`setMyCommands`/`deleteMyCommands`).");
+    eprintln!("telegram diagnostics: detected Telegram command sync network failure (`setMyCommands`/`deleteMyCommands`).");
+    eprintln!("telegram diagnostics: this signal is retryable and can be non-fatal when Telegram messaging is otherwise healthy.");
     print_gateway_telegram_hints(runtime);
 }
 
@@ -3533,6 +3640,46 @@ fn network_policy_allows_host(rules: &::agent_ruler::config::NetworkRules, host:
 
     (!rules.allowlist_hosts.is_empty() && !rules.invert_allowlist && in_allowlist)
         || (!rules.denylist_hosts.is_empty() && rules.invert_denylist && in_denylist)
+}
+
+fn runtime_doctor_guidance_for_text(text: &str) -> Option<&'static str> {
+    let lowered = text.to_ascii_lowercase();
+
+    let repairable = lowered.contains("managed bridge did not open inbound listener")
+        || lowered.contains("bridge routes")
+        || lowered.contains("api.telegram.org")
+        || lowered.contains("openclaw config get")
+        || lowered.contains("openclaw config set")
+        || lowered.contains("no api key found for provider 'anthropic'")
+        || lowered.contains("no api key found for provider \"anthropic\"");
+    if repairable {
+        return Some("Run: agent-ruler doctor --repair");
+    }
+
+    let diagnostic_only = lowered.contains("confinement unavailable")
+        || lowered.contains("setting up uid map")
+        || lowered.contains("uid map")
+        || lowered.contains("bwrap")
+        || lowered.contains("managed home")
+        || lowered.contains("managed workspace")
+        || lowered.contains("runtime root")
+        || lowered.contains("preflight api unavailable");
+    if diagnostic_only {
+        return Some("Run: agent-ruler doctor");
+    }
+
+    None
+}
+
+fn attach_doctor_guidance(err: anyhow::Error) -> anyhow::Error {
+    let message = err.to_string();
+    if message.contains("Run: agent-ruler doctor") {
+        return err;
+    }
+    let Some(guidance) = runtime_doctor_guidance_for_text(&message) else {
+        return err;
+    };
+    anyhow!("{message}\n{guidance}")
 }
 
 fn gateway_pid_record_file(runtime: &::agent_ruler::config::RuntimeState) -> PathBuf {
@@ -4391,15 +4538,18 @@ mod tests {
     use super::{
         claudecode_command_needs_preflight_api, claudecode_command_requires_managed_auth,
         claudecode_legacy_web_alias_requested, inject_claudecode_governance_plugin_dir,
-        is_opencode_command, kill_process_with_retry, network_policy_allows_host,
+        is_openclaw_gateway_restart, is_opencode_command, kill_process_with_retry,
+        managed_restart_launch_command, network_policy_allows_host,
         openclaw_command_needs_preflight_api, opencode_command_needs_preflight_api,
         parse_gateway_pid_from_listening_line, parse_gateway_pid_from_log_line,
         parse_gateway_pid_from_log_since, parse_http_status_code,
         parse_opencode_web_port_from_command, parse_opencode_web_port_from_log_since,
         parse_pid_from_ss_line, parse_stop_runner_target, preferred_ui_bind, process_exists,
         resolve_socket_addrs, runner_auth_prerequisite_hint, runner_command_requires_ui_ready,
-        runner_web_kind_for_launch_command, runner_web_stop_kind, runner_web_url_hint_from_command,
-        stop_managed_background_launcher, RunnerWebKind, CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE,
+        runner_web_kind_for_launch_command, runner_web_restart_kind, runner_web_stop_kind,
+        runner_web_url_hint_from_command, runtime_doctor_guidance_for_text,
+        stop_managed_background_launcher, ManagedRestartKind, RunnerWebKind,
+        CLAUDECODE_GOVERNANCE_PLUGIN_RELATIVE,
     };
     use ::agent_ruler::config::{init_layout, load_runtime, NetworkRules};
     use ::agent_ruler::runners::RunnerKind;
@@ -4450,6 +4600,32 @@ mod tests {
             network_policy_allows_host(&rules, "api.telegram.org"),
             "telegram host should be allowed in open policy mode"
         );
+    }
+
+    #[test]
+    fn doctor_guidance_recommends_repair_for_bridge_timeout_signatures() {
+        let guidance = runtime_doctor_guidance_for_text(
+            "managed bridge did not open inbound listener 127.0.0.1:4661 within startup timeout",
+        )
+        .expect("expected doctor guidance");
+        assert_eq!(guidance, "Run: agent-ruler doctor --repair");
+    }
+
+    #[test]
+    fn doctor_guidance_recommends_diagnostics_for_confinement_signatures() {
+        let guidance =
+            runtime_doctor_guidance_for_text("confinement unavailable: bwrap: setting up uid map")
+                .expect("expected doctor guidance");
+        assert_eq!(guidance, "Run: agent-ruler doctor");
+    }
+
+    #[test]
+    fn doctor_guidance_recommends_repair_for_anthropic_provider_fallback_signature() {
+        let guidance = runtime_doctor_guidance_for_text(
+            "No API key found for provider 'anthropic' in managed runtime",
+        )
+        .expect("expected doctor guidance");
+        assert_eq!(guidance, "Run: agent-ruler doctor --repair");
     }
 
     #[test]
@@ -4829,6 +5005,48 @@ mod tests {
     }
 
     #[test]
+    fn runner_restart_detection_maps_to_expected_managed_launch() {
+        let openclaw_restart = vec![
+            "openclaw".to_string(),
+            "gateway".to_string(),
+            "restart".to_string(),
+        ];
+        assert!(is_openclaw_gateway_restart(&openclaw_restart));
+        assert_eq!(
+            managed_restart_launch_command(ManagedRestartKind::OpenclawGateway),
+            vec!["openclaw".to_string(), "gateway".to_string()]
+        );
+
+        let claude_restart = vec![
+            "claude".to_string(),
+            "remote-control".to_string(),
+            "restart".to_string(),
+        ];
+        assert_eq!(
+            runner_web_restart_kind(&claude_restart),
+            Some(RunnerWebKind::Claudecode)
+        );
+        assert_eq!(
+            RunnerWebKind::Claudecode.restart_kind(),
+            ManagedRestartKind::ClaudecodeRemoteControl
+        );
+
+        let opencode_restart = vec![
+            "opencode".to_string(),
+            "web".to_string(),
+            "restart".to_string(),
+        ];
+        assert_eq!(
+            runner_web_restart_kind(&opencode_restart),
+            Some(RunnerWebKind::Opencode)
+        );
+        assert_eq!(
+            RunnerWebKind::Opencode.restart_kind(),
+            ManagedRestartKind::OpencodeWeb
+        );
+    }
+
+    #[test]
     fn runner_web_launch_detection_skips_help_and_version_invocations() {
         let opencode_help = vec![
             "opencode".to_string(),
@@ -4890,6 +5108,16 @@ mod tests {
         assert!(
             !runner_command_requires_ui_ready(&openclaw_help),
             "help/version invocations should not auto-start UI"
+        );
+
+        let openclaw_restart = vec![
+            "openclaw".to_string(),
+            "gateway".to_string(),
+            "restart".to_string(),
+        ];
+        assert!(
+            !runner_command_requires_ui_ready(&openclaw_restart),
+            "restart command should be treated as managed control flow"
         );
     }
 

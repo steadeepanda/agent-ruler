@@ -7,13 +7,16 @@ use std::fs;
 use std::path::PathBuf;
 
 use agent_ruler::approvals::ApprovalStore;
+use agent_ruler::claudecode_bridge::generated_config_path as claudecode_bridge_config_path;
 use agent_ruler::config::{
     init_layout, load_runtime, save_config, save_policy, RuntimeState, CONFIG_FILE_NAME,
 };
+use agent_ruler::helpers::ui::runtime_api::sync_selected_runner_telegram_bridges;
 use agent_ruler::helpers::{apply_profile_preset, workspace_root_for_runner_id};
 use agent_ruler::model::{
     ActionKind, ActionRequest, Decision, ProcessContext, ReasonCode, Receipt, Verdict,
 };
+use agent_ruler::opencode_bridge::generated_config_path as opencode_bridge_config_path;
 use agent_ruler::policy::PolicyEngine;
 use agent_ruler::receipts::ReceiptStore;
 use agent_ruler::runner::run_confined;
@@ -287,6 +290,30 @@ async fn ui_global_runtime_path_toggle_wiring_is_present() {
     assert!(
         js.contains("Zone 0 (workspace):</span> <span class=\"mono\">${esc(aliasRuntimePath("),
         "runners page zone visibility should render through runtime alias helper"
+    );
+}
+
+#[tokio::test]
+async fn execution_layer_ui_includes_doctor_copy_and_non_duplicated_one_shot_layout() {
+    let harness = UiHarness::new("ui-execution-layer-layout");
+    let (status, js) = call_text(&harness.app, Method::GET, "/assets/ui.js").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        js.contains("copyButtonId: 'exec-doctor-copy-output'"),
+        "doctor output should expose copy button wiring"
+    );
+    assert!(
+        js.contains("showPrimary: false"),
+        "one-shot execution output should render stream blocks once without duplicate primary stdout"
+    );
+    assert!(
+        js.contains("summaryText: payload.summary_line || ''"),
+        "doctor output should render the real summary line in the header"
+    );
+    assert!(
+        js.contains("Recommended next step:"),
+        "doctor output should include a recommendation block"
     );
 }
 
@@ -2201,6 +2228,117 @@ async fn reset_exec_and_run_script_endpoints_work() {
 }
 
 #[tokio::test]
+async fn run_script_agent_ruler_uses_webui_runtime_source_of_truth() {
+    let harness = UiHarness::new("ui-run-script-agent-ruler-runtime");
+
+    let (run_code, run_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/run/script",
+        Some(json!({
+            "script": "agent-ruler status --json"
+        })),
+    )
+    .await;
+
+    if run_code == StatusCode::OK {
+        let stdout = run_payload["stdout"]
+            .as_str()
+            .expect("stdout should be present on success");
+        let status_payload: Value =
+            serde_json::from_str(stdout).expect("parse nested status json from one-shot command");
+        assert_eq!(
+            status_payload["runtime_root"].as_str(),
+            Some(harness.runtime.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            run_payload["summary_line"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(harness.runtime.path().to_string_lossy().as_ref()),
+            "one-shot summary should surface the authoritative WebUI runtime"
+        );
+        return;
+    }
+
+    let err = run_payload["error"].as_str().unwrap_or_default();
+    if is_confinement_env_error(err) {
+        eprintln!("skipping one-shot runtime binding assertion due host confinement limits: {err}");
+        return;
+    }
+
+    panic!("unexpected run-script failure: status={run_code} payload={run_payload}");
+}
+
+#[tokio::test]
+async fn run_script_blocks_direct_runner_cli_to_keep_webui_runtime_authoritative() {
+    let harness = UiHarness::new("ui-run-script-runner-block");
+
+    let (run_code, run_payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/run/script",
+        Some(json!({
+            "script": "openclaw gateway restart"
+        })),
+    )
+    .await;
+
+    if run_code == StatusCode::BAD_REQUEST {
+        let stderr = run_payload["stderr"].as_str().unwrap_or_default();
+        let error = run_payload["error"].as_str().unwrap_or_default();
+        let combined = format!("{stderr}\n{error}");
+        if is_confinement_env_error(&combined) {
+            eprintln!(
+                "skipping bare-runner one-shot assertion due host confinement limits: {combined}"
+            );
+            return;
+        }
+        assert!(
+            combined.contains("Use `agent-ruler run -- openclaw ...` in One-Shot Command"),
+            "one-shot runner block should direct operators back to the managed wrapper"
+        );
+        return;
+    }
+
+    panic!(
+        "expected run-script to block bare runner CLI, got status={run_code} payload={run_payload}"
+    );
+}
+
+#[test]
+fn openclaw_runner_bridge_sync_does_not_generate_other_runner_configs() {
+    let harness = UiHarness::new("ui-openclaw-runner-bridge-sync");
+    let runtime = harness.runtime_state();
+    let managed_workspace = runtime.config.runtime_root.join("workspace");
+    persist_runner_association(&runtime, RunnerKind::Openclaw, managed_workspace);
+    let runtime = harness.runtime_state();
+
+    let claudecode_path = claudecode_bridge_config_path(&runtime);
+    let opencode_path = opencode_bridge_config_path(&runtime);
+    assert!(
+        !claudecode_path.exists(),
+        "precondition: Claude bridge config should be absent"
+    );
+    assert!(
+        !opencode_path.exists(),
+        "precondition: OpenCode bridge config should be absent"
+    );
+
+    sync_selected_runner_telegram_bridges(&runtime, false, false)
+        .expect("sync should succeed for OpenClaw runtime");
+
+    assert!(
+        !claudecode_path.exists(),
+        "OpenClaw sync should not generate Claude bridge config artifacts"
+    );
+    assert!(
+        !opencode_path.exists(),
+        "OpenClaw sync should not generate OpenCode bridge config artifacts"
+    );
+}
+
+#[tokio::test]
 async fn openclaw_tool_preflight_endpoint_logs_and_blocks_system_write() {
     let harness = UiHarness::new("ui-openclaw-tool-preflight");
     let runtime = harness.runtime_state();
@@ -2852,6 +2990,105 @@ async fn openclaw_tool_preflight_blocks_agent_ruler_cli_exec() {
 }
 
 #[tokio::test]
+async fn openclaw_tool_preflight_blocks_direct_runner_cli_exec_with_wrapper_guidance() {
+    let harness = UiHarness::new("ui-openclaw-runner-cli");
+    let runtime = harness.runtime_state();
+    let openclaw_workspace = runtime.config.runtime_root.join("workspace-openclaw");
+    persist_runner_association(&runtime, RunnerKind::Openclaw, openclaw_workspace);
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/openclaw/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": "openclaw gateway restart"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-openclaw-runner-cli-test"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["blocked"], true);
+    assert_eq!(payload["reason"], "deny_system_critical");
+    assert!(payload["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("agent-ruler run -- openclaw gateway restart"));
+}
+
+#[tokio::test]
+async fn claudecode_tool_preflight_blocks_direct_runner_cli_exec_with_wrapper_guidance() {
+    let harness = UiHarness::new("ui-claude-runner-cli");
+    let runtime = harness.runtime_state();
+    let claude_workspace = runtime.config.runtime_root.join("workspace-claude");
+    persist_runner_association(&runtime, RunnerKind::Claudecode, claude_workspace);
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/runners/claudecode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": "claude remote-control stop"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-claude-runner-cli-test"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["blocked"], true);
+    assert_eq!(payload["reason"], "deny_system_critical");
+    assert!(payload["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("agent-ruler run -- claude remote-control stop"));
+}
+
+#[tokio::test]
+async fn opencode_tool_preflight_blocks_direct_runner_cli_exec_with_wrapper_guidance() {
+    let harness = UiHarness::new("ui-opencode-runner-cli");
+    let runtime = harness.runtime_state();
+    let opencode_workspace = runtime.config.runtime_root.join("workspace-opencode");
+    persist_runner_association(&runtime, RunnerKind::Opencode, opencode_workspace);
+
+    let (code, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/opencode/tool/preflight",
+        Some(json!({
+            "tool_name": "exec",
+            "params": {
+                "command": "opencode web stop"
+            },
+            "context": {
+                "agent_id": "main",
+                "session_key": "session-opencode-runner-cli-test"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["blocked"], true);
+    assert_eq!(payload["reason"], "deny_system_critical");
+    assert!(payload["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("agent-ruler run -- opencode web stop"));
+}
+
+#[tokio::test]
 async fn openclaw_tool_preflight_blocks_agent_ruler_internal_paths() {
     let harness = UiHarness::new("ui-openclaw-internal-paths");
     let runtime = harness.runtime_state();
@@ -3352,6 +3589,66 @@ async fn help_site_prefers_runtime_docs_bundle_when_present() {
     assert!(body.contains("Runtime Help Bundle"));
 }
 
+#[tokio::test]
+async fn help_feedback_route_returns_control_panel_shell() {
+    let harness = UiHarness::new("ui-help-feedback");
+    let (status, body) = call_text(&harness.app, Method::GET, "/help-feedback").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("data-page=\"help-feedback\""),
+        "help-feedback route should render shell with active page marker"
+    );
+}
+
+#[tokio::test]
+async fn doctor_endpoint_returns_structured_report() {
+    let harness = UiHarness::new("ui-doctor-api");
+    let (status, payload) = call_json(
+        &harness.app,
+        Method::POST,
+        "/api/doctor",
+        Some(json!({ "repair": false })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        payload.get("status").is_some(),
+        "doctor response should include status"
+    );
+    assert!(
+        payload
+            .get("checks")
+            .and_then(|value| value.as_array())
+            .is_some(),
+        "doctor response should include checks array"
+    );
+    assert!(
+        payload
+            .get("output")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("Agent Ruler Doctor"),
+        "doctor response should include rendered operator output"
+    );
+    assert!(
+        payload
+            .get("summary_line")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .starts_with("summary: status="),
+        "doctor response should include a summary line for UI rendering"
+    );
+    assert!(
+        payload
+            .get("recommendation")
+            .and_then(|value| value.get("message"))
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "doctor response should include a recommendation for next-step guidance"
+    );
+}
+
 /// Test: GET /api/capabilities returns a safe capabilities contract
 ///
 /// This test verifies that the capabilities endpoint:
@@ -3462,6 +3759,7 @@ async fn capabilities_endpoint_returns_safe_contract() {
         "/api/reset-exec",
         "/api/reset-runtime",
         "/api/run/command",
+        "/api/doctor",
     ];
 
     for endpoint in &required_operator_only {

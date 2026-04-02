@@ -1,0 +1,111 @@
+name: Bug Report
+description: Report a runtime or UX bug in Agent Ruler.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug.
+        Please include as much concrete detail as possible so we can reproduce quickly.
+
+  - type: input
+    id: agent_ruler_version
+    attributes:
+      label: Agent Ruler version
+      description: Output of `agent-ruler --version`.
+      placeholder: v0.1.10
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Runner
+      description: Which runner is affected?
+      options:
+        - openclaw
+        - claudecode
+        - opencode
+        - no-runner / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: runner_version
+    attributes:
+      label: Runner version
+      description: Output of the runner version command (if applicable).
+      placeholder: openclaw --version / claude --version / opencode --version
+
+  - type: input
+    id: os_distro
+    attributes:
+      label: OS / distro
+      description: Include kernel version when relevant.
+      placeholder: Ubuntu 24.04, kernel 6.x
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_area
+    attributes:
+      label: Affected area
+      options:
+        - CLI run flow
+        - Doctor / diagnostics
+        - Confinement (bwrap)
+        - OpenClaw bridge / gateway
+        - WebUI
+        - Policy / approvals
+        - Import / export / delivery
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact command(s) and sequence.
+      placeholder: |
+        1. agent-ruler init
+        2. agent-ruler setup
+        3. agent-ruler run -- ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor_output
+    attributes:
+      label: `agent-ruler doctor` output
+      description: Include `agent-ruler doctor --repair` output if you tried it.
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste stderr/stdout snippets and/or files from runtime logs.
+      render: shell
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Anything else that may help (workarounds, regression range, etc.).

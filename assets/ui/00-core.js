@@ -502,6 +502,9 @@
       case 'files':
         renderFiles(root);
         break;
+      case 'help-feedback':
+        renderHelpFeedback(root);
+        break;
       case 'policy':
         renderPolicy(root);
         break;
